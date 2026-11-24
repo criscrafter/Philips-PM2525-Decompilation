@@ -18,12 +18,6 @@ fw/out/
 fw/out_ref/
 fw/out_tl/
 fw/out_shrink/
-*.ihx
-*.rel
-*.rst
-*.lst
-*.sym
-*.map
 
 # Python
 __pycache__/

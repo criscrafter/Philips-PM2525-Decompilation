@@ -1,0 +1,801 @@
+# PM2525 S25 symbol file for dis8051.py
+# NOTE: bus A here = "bus B (option)" and bus B here = "bus A (internal)" in manuals/06_option_bus_protocol_hardware_notes.md
+code 0x0000 reset_vector
+code 0x51FA start            entry
+
+# JMP @A+DPTR tables (first entry, count, stride)
+jtab 0x35C7 0x35C8 15 3
+jtab 0x1D78 0x1D79 5 2
+jtab 0x1662 0x1663 16 2
+jtab 0x10E8 0x10E9 16 2
+jtab 0x7B05 0x7B06 12 3
+jtab 0x7866 0x7867 12 3
+jtab 0x1CA2 0x1CA3 4 2
+
+# ---------------------------------------------------------------- boot / main
+code 0x002B main_loop            # main super-loop; re-inits SP each pass, polls interface, runs all tasks
+code 0x00E4 iface_select_pending # pick pending interface channel (xdata 0x56/0x53) into ptr 1Dh:1Eh
+code 0x5226 iface_boot_handshake # power-up handshake with interface board (I2C bus A, 0x58..)
+code 0x5275 read_option_switches # reads option/config byte via 5ACF, stores flags 23h.2/23h.3
+code 0x5295 system_init          # IE/TCON/SCON off, clear IRAM 08..5F, init state, LCD test pattern
+code 0x5344 i2c_both_buses_stop  # release both bit-banged I2C buses
+
+# ---------------------------------------------------------------- I2C bus A (SDA=P1.1, SCL=P3.2/INT0)
+# devices: 0x4E PCF8574 (read/write), 0x58-0x5E interface-board controller
+code 0x6354 i2cA_read1          # A=addr: start+addr(R), read 1 byte w/ NACK, stop. C=1 on no-ack
+code 0x6363 i2cA_write1         # A=addr, R3=data: start+addr(W), send, stop
+code 0x6359 i2cA_recv_nack_stop
+code 0x635C i2cA_nack_stop
+code 0x6369 i2cA_send_stop      # send A then stop
+code 0x6377 i2cA_start_write    # start + addr (R/W=0); C=1 if NACK
+code 0x6388 i2cA_start_read     # start + addr (R/W=1); C=1 if NACK
+code 0x6397 i2cA_send_byte      # 8 bits MSB first, waits for clock stretching, returns ACK in C
+code 0x63AD i2cA_read_ack_bit
+code 0x63C8 i2cA_stop
+code 0x63DD i2cA_recv_ack       # receive byte then send ACK
+code 0x63E1 i2cA_send_ack
+code 0x63FA i2cA_recv_byte
+
+# ---------------------------------------------------------------- I2C bus B (SDA=P1.7, SCL=P3.5/T1)
+# devices: 0x70 PCF8576 LCD driver, 0x48 PCF8574, 0x80/82/84/8B(w) 8D(r) OQ0071 ADC interface
+code 0x6B3A i2cB_recv_nack_stop
+code 0x6B44 i2cB_write1         # A=addr, R3=data
+code 0x6B4A i2cB_send_stop
+code 0x6B55 i2cB_start_write
+code 0x6B62 i2cB_start_read
+code 0x6B64 i2cB_start          # start condition + address byte (ACC.0 = R/W)
+code 0x6B6F i2cB_send_byte
+code 0x6B81 i2cB_read_ack_bit
+code 0x6B8F i2cB_stop
+code 0x6B9B i2cB_read1
+code 0x6BB0 i2cB_recv_byte
+
+# ---------------------------------------------------------------- serial shift registers (share P1.7/T1)
+code 0x5A8D shiftreg_write_analog # shift out IRAM 08h,09h on P1.7/T1, latch with P1.3. 09h.1 = switch-motor direction, 08h.4 strobe
+code 0x5AA3 shiftreg_out_byte
+code 0x5AB2 funcswitch_read_pos    # shift in 8 bits from P1.0 = function-switch position (motor-driven rotary switch)
+
+# ---------------------------------------------------------------- tasks called by main_loop
+code 0x7BDA iface_poll_channel  # DPTR=channel descriptor (xdata); service interface board
+code 0x7BF0 iface_send_channel
+code 0x7C8E iface_receive_channel # returns C=1 when a byte/command arrived
+code 0x7D01 iface_i2c_read_block
+code 0x7D26 iface_i2c_write_block
+code 0x7F3E iface_i2c_addr      # address = 0x58 | ((R4>>4)&6)
+code 0x543C task_remote_parse      # swap in parser context (XDATA 0x00DB, 13 bytes + float 0x01D1) and run one parser step
+code 0x2AA9 task_display_menu   # 1385 B: display/CHECK menu (ADDr, rTL, T.ONLY, Cr, 60H, SOFT, CAL, version)
+code 0x409C task_keyboard       # 1906 B: key handling / function+range selection state machine
+code 0x5468 task_5468           # uses P1.6
+code 0x5D96 task_5D96
+code 0x5D02 task_5D02
+code 0x1009 task_measure        # 1965 B: measurement sequencing, timers T0/T1, ADC cycles
+code 0x326C task_display_update # every 50 main-loop passes (24h.1): result -> LCD
+code 0x4D2B task_remote_reply   # 1228 B: builds interface replies (command table at 0x59B1)
+
+# ---------------------------------------------------------------- remote command helpers
+code 0x4968 reply_put_mnemonic  # append 3-char mnemonic #(33h) from table 0x59B1 to reply buffer
+code 0x49B7 reply_put_string    # append '#'-terminated code string at (2Dh:2Eh)
+code 0x59B1 cmd_table           # 5-byte entries: 3 chars + 2 code bytes. VPU..CON functions, then FNC,RNG,...
+
+# ---------------------------------------------------------------- display
+code 0x5CA7 lcd_show_message    # DPTR -> message in table 0x70E4 ('#'-terminated, 11 chars)
+code 0x37F5 lcd_refresh
+code 0x70E4 msg_table           # " -------", " -OL----", " -UL----", "FAIL", " -OFL---", "Error", "ADDr -", ...
+code 0x6DAB reply_strings       # "OFF,", " ON,", CLOSED/OPEN/AUTO/... reply fragments
+code 0x59A6 version_string      # "PM25253 S25"
+
+# ---------------------------------------------------------------- interrupts
+code 0x534D isr_timer0          # Timer 0 overflow
+code 0x5398 isr_int1_gate        # INT1 edge: stop T0, start T1 with reload (time/frequency gate); not ADC READY
+code 0x53B8 isr_timer1          # Timer 1 overflow
+
+# ---------------------------------------------------------------- runtime helpers
+code 0x6D78 dptr_add_a          # DPTR += A
+code 0x6D8C dptr_add_a_mul_b    # DPTR += A*B (table index)
+code 0x6D81 dptr_add_r6r7       # DPTR += R6:R7
+
+# ================================================================ measurement (task_measure, 0x1009)
+# State: IRAM 20h = meter state: bits0-3 function, bits4-6 range, bit7 autorange (boot value 0xA1).
+# task_measure swaps 14 bytes of context XDATA 0x00BE..0x00CB <-> IRAM 2Ah..37h (bit flags 2Ah.0-2Fh.7) on entry/exit.
+# Phase flags: 2Ch.0 = function-switch/relay setup, 2Ch.1 = acquisition, 2Ch.2 = result processing.
+code 0x107F meas_ctx_ptr           # DPTR=0x00BE, R0=0x2A, R2=14: measurement context descriptor
+code 0x1072 meas_exit              # save context back to XDATA and return
+code 0x10A6 meas_restart           # restart the measurement sequence (clears 23h.0, sets 22h.3)
+code 0x1087 meas_init              # power-up init of measurement engine (EA off, flags, calls 10D1/5BCB)
+code 0x10A0 meas_restart_from_ui   # called from keyboard / task_5468 after a function or range change
+code 0x10AC meas_restart_b         # same, called from 3CC3
+code 0x259E meas_phase_switch      # drive motor switch to table position (funcswitch_pos_table), set relays, settle
+code 0x213B meas_phase_acquire     # start acquisition; branches per function: 0->2201, 8->238C, 9->23E1, 10->24FF, else ADC 22CE
+code 0x2092 meas_phase_process     # process finished conversion: scale, autorange, filter, store
+code 0x2352 adc_wait_ready_read    # poll INT1 pin (OQ0071 READY, active low), read 0x8D -> count in 10h:0Fh:0Eh
+code 0x29C2 funcswitch_pos_table   # function -> required switch position (bit1 = range-dependent)
+code 0x211D diag_count_event       # A = event id: ++XDATA[0x0772+A], ++XDATA[0x076C]. 0x0A,0x0B (ADC timeout),0x0C (no phase)
+code 0x1145 meas_scale_result      # converts raw count to value using range constants (0x7040..) and float math
+code 0x1487 meas_process_special   # processing for modes 25h.1 / 2Dh.3 / 2Dh.6 (peak/temperature?)
+code 0x1515 meas_process_func8     # result processing for function 8 (timer-based measurement)
+code 0x1C86 freq_autorange         # function 10 only: gate-time autorange, thresholds 90/103, 900/1003 counts
+code 0x1C63 meas_range_checks      # calls 1BB7/1C20/1AC0/1AFE/1B74 (over/under-range handling?)
+code 0x19A8 range_param_lookup     # per-range constants (tables 0x6FE9..0x7031)
+code 0x182C result_store           # store float result to XDATA 0x00F2
+code 0x287F timer0_start_settle    # T0 as settle timer (27h.5 mode: ISR kicks watchdog P1.2)
+code 0x298C timer1_setup_count
+code 0x21D7 freq_gate_setup        # INT1 edge gate + T0/T1 for time/frequency functions
+
+# ================================================================ OQ0071 ADC interface (I2C bus B, group address 8)
+code 0x14A2 adc_start_cycle        # cmd 0x89 (or 0x8B if 26h.6) then PCF8574@0x4E bit0 = !26h.6
+code 0x21B1 adc_start_cycle_alt    # cmd 0x8B if 26h.6 else adc_start_cycle
+code 0x2560 adc_arm_timeout        # timeout counter 12h/13h = 0x0420 passes, set busy flags 2Eh.3/25h.0/2Eh.1
+code 0x256D adc_write_latches      # cmd 0x80, 0xD0, IRAM 0Ah = 8 output latches (input sensitivity, beeper)
+code 0x2573 adc_latch_cmd_begin
+code 0x2580 adc_set_times          # cmd 0x82 + R6,R5 = wait time T1; if F0=0 also 0x84 (count time T2)
+code 0x2591 adc_set_count_time     # cmd 0x84 + R6,R5 = count time T2
+
+# ================================================================ interrupts (details)
+# isr_timer0: 27h.5 = settle-timer mode (pulses P1.2 watchdog, counts 1Bh); 25h.1 = count extension (++0Fh);
+#             function 8: gate toggling via TXD pin; function 10: ++10h.
+# isr_timer1: function 8: 32-bit overflow count in 0Fh..11h; function 9 gated; else period sampling into 16h..18h.
+
+# ================================================================ data helpers
+code 0x6D1E xdata_clear3
+code 0x6D25 xdata_is_zero3         # C=1 if 3 bytes at DPTR are zero
+code 0x6D34 xdata_to_iram          # copy R2 bytes XDATA@DPTR -> IRAM@R0
+code 0x6D3B iram_to_xdata          # copy R2 bytes IRAM@R0 -> XDATA@DPTR
+code 0x6D42 xdata_swap_iram        # exchange R2 bytes
+code 0x6D4A xdata_block_xfer
+
+# ================================================================ float library
+# Format: 4 bytes, byte0 = sign(bit7) | exponent(bias 62), bytes1-3 = mantissa with explicit leading 1:
+#   value = m/2^24 * 2^(e-62). Zero = exponent byte 0. In IRAM the exponent byte is at the highest
+#   address and R0/R1 point at it. Examples: 4C9C3C00 = 9999, 31D1B717 = 1e-4, 66E8D4A4 = 1e12.
+code 0x657D fp_add                 # @R0 += @R1
+code 0x656F fp_sub                 # @R0 -= @R1 (negate R1, add)
+code 0x6577 fp_rsub                # @R0 = @R1 - @R0
+code 0x66EA fp_mul                 # @R0 *= @R1
+code 0x664C fp_div                 # @R0 /= @R1; C=1,OV=1 on divide by zero
+code 0x6767 fp_cmp                 # compare @R0 with @R1 -> C
+code 0x67AB fp_copy_r1_to_r0
+code 0x686B fp_swap
+code 0x67C0 fp_ld_code_r0          # @R0 = float from code @DPTR
+code 0x67D0 fp_ld_code_r1
+code 0x6884 fp_ld_xdata_r0
+code 0x6893 fp_ld_xdata_r1
+code 0x68A2 fp_st_r0_xdata
+code 0x68B1 fp_st_r1_xdata
+code 0x68CB fp_ld_pow10_r1         # @R1 = 10^A, A = -18..19 (table 0x68DF)
+code 0x68DF pow10_table            # 38 floats 1e-18 .. 1e19
+code 0x6C02 mant_mul24             # 24x24 mantissa multiply (used by fp_mul)
+code 0x6FC0 const_fp_table         # +max, -max, -1e12, +1e12, tiny, 1e-4, 9999, 600, ...
+
+# ================================================================ 24-bit integer helpers
+code 0x6AD1 i24_clr_r0
+code 0x6ADC i24_clr_r1
+code 0x6AF1 i24_cmp                # @R0 - @R1 -> C (and zero test)
+code 0x6B26 i24_ld_code_r1
+code 0x6BCE i24_st_r0_xdata
+code 0x6BE8 i24_ld_xdata_r0
+code 0x6BF5 i24_ld_xdata_r1
+code 0x69BE i24_div                # 24-bit restoring division
+
+# ================================================================ function numbers (meter_state bits 0-3)
+# 0 Vpeak (21h.7/21h.6: 01=Vp+ 10=Vp- 11=Vpp)   1 VDC   2 VAC   3 V rms (VRM)   4 ohm 4-wire (RFW)   5 ohm 2-wire (RTW)
+# 6 IDC   7 IAC   8 time interval (21h.5 = start on neg. slope, 21h.4 = stop on neg. slope)
+# 9 capacitance   10 frequency   11 temperature degC (Pt-100, TDC)   12 diode   13 continuity
+code 0x4132 fnsel_dispatch         # 2Eh = command index 0..0x12 (VPU..CON) -> jump table fnsel_jtab
+code 0x465D fnsel_jtab             # 19 x LJMP, one per function mnemonic
+code 0x46F0 fnsel_apply            # 3Ah = new function number; applies it to meter_state
+code 0x413E fnsel_VPU
+code 0x4148 fnsel_VPL
+code 0x4152 fnsel_VPP
+code 0x415C fnsel_VDC
+code 0x4162 fnsel_VAC
+code 0x4168 fnsel_VRM
+code 0x416E fnsel_RFW
+code 0x4174 fnsel_RTW
+code 0x417A fnsel_IDC
+code 0x4180 fnsel_IAC
+code 0x4186 fnsel_TPP
+code 0x4190 fnsel_TPN
+code 0x419A fnsel_TNP
+code 0x41A4 fnsel_TNN
+code 0x41AE fnsel_CAP
+code 0x41B4 fnsel_FRQ
+code 0x41BA fnsel_TDC
+code 0x41C0 fnsel_DIO
+code 0x41C6 fnsel_CON
+
+# ================================================================ IRAM variables (outside the swapped context area 2Ah-37h)
+data 0x08 shiftreg_out0            # analog shift register byte 0 (bit4 = strobe)
+data 0x09 shiftreg_out1            # analog shift register byte 1 (bit1 = switch-motor direction)
+data 0x0A adc_latch_byte           # OQ0071 output latches
+data 0x0E adc_count_lo
+data 0x0F adc_count_mid
+data 0x10 adc_count_hi
+data 0x12 adc_timeout_lo
+data 0x13 adc_timeout_hi
+data 0x20 meter_state              # bits0-3 function, bits4-6 range, bit7 autorange
+data 0x3A fnsel_new_function
+bit 0x0F peak_mode_b1              # 21h.7
+bit 0x0E peak_mode_b0              # 21h.6
+bit 0x0D time_start_negslope       # 21h.5
+bit 0x0C time_stop_negslope        # 21h.4
+bit 0x07 meter_autorange           # 20h.7
+bit 0x36 adc_alt_mode              # 26h.6: start with 0x8B instead of 0x89
+
+# ================================================================ XDATA variables
+xdata 0x0034 reply_buf
+xdata 0x00BE meas_ctx_save         # 14 bytes, swapped with IRAM 2Ah..37h
+xdata 0x00F2 meas_result           # float
+xdata 0x076C diag_err_total        # also counts copy-1 checksum errors
+xdata 0x0772 diag_event_counters
+
+# ================================================================ ranges
+# value = count * 10^(range_scale_exp) ; exponent = per-function base + range (bits 4-6 of meter_state)
+# IRAM 21h bits0-1 = SPEED setting: 0 = SPEED 1 (high resolution), 1 = SPEED 2 (normal, default), 2 = SPEED 3 (high speed)
+code 0x165A range_scale_exp        # A = base(function) + range. Bases: Vpk -4, V -5, ohm -2, I -11 (-9 if 25h.6), time 0, C -14, f -3 (-4 in range 6), degC -1, diode -4, cont -2
+code 0x16BA count_to_value         # 4Fh (i24 count) -> float * 10^range_scale_exp
+code 0x194C range_can_go_up        # C=1 if range+1 is enabled in valid_range_masks
+code 0x1959 range_can_go_down      # C=1 if range-1 is enabled (current on 25h.6 input: only from range 6/7)
+code 0x1975 range_mask_test        # tests bit R0 of valid_range_masks[function*3 + speed]
+code 0x6ED4 valid_range_masks      # 14 functions x 3 speeds, bit r = range r allowed
+code 0x1AFE autorange_step         # compare count with 42h (down), 46h (up), 4Ah (overload); step meter_state range by +-0x10
+code 0x1AC0 meas_prepare_count
+code 0x6FE9 range_count_limits     # 24-bit count thresholds used by range_param_lookup (1800, 2000/2100, 10000/11000, 20000/21000, ...)
+code 0x68C0 dptr_add_a_b           # DPTR += A
+code 0x6B17 i24_ld_code_r0
+code 0x6B05 i24_copy_r1_to_r0
+bit 0x08 speed_b0                  # 21h.0
+bit 0x09 speed_b1                  # 21h.1
+data 0x21 meter_mode               # bits0-1 speed, bit4/5 time slopes, bit6/7 peak mode
+data 0x42 range_lim_down           # i24
+data 0x46 range_lim_up             # i24
+data 0x4A range_lim_overload       # i24
+
+# ================================================================ calibration
+# Cal RAM (battery-backed): 3 identical copies of 456 bytes (114 float slots) + 16-bit additive checksum each:
+#   copy1 0x0200-0x03C7 (sum 0x03C8), copy2 0x03CF-0x0596 (sum 0x0597), copy3 0x059E-0x0765 (sum 0x0766).
+# Per range a ROM recipe (cal_recipe_table) names which slots form the 6 coefficients of 1 or 2 records:
+#   K0 zero, K1 gain, K2 zero ref. temp, K3 gain ref. temp, K4 zero temp. slope, K5 gain temp. slope.
+# Record 1 (table flag bit7) = second set swapped in for Vpeak/VDC/CAP (negative polarity: VPL, -20 VDC).
+code 0x0111 cal_load_range         # verify/repair 3 copies, evaluate recipe of current range into cal_work_set0/1
+code 0x03DD cal_eval_field         # evaluate one coefficient (mode 0-5) for all records of the recipe
+code 0x0453 cal_f_zero             # mode 0: K0 = product of A pointers (default 0)
+code 0x0496 cal_f_gain             # mode 1: K1 = B0 * B1.. / Bn (h0>>6 multiplies) (default 1)
+code 0x051B cal_f_zero_tref        # mode 2: K2 = X (default 0.5)
+code 0x054D cal_f_gain_tref        # mode 3: K3 = C0 (default 0.5)
+code 0x057F cal_f_zero_tslope      # mode 4: K4 = product of C1.. (default 0)
+code 0x05C2 cal_f_gain_tslope      # mode 5: K5 = from D (default 0)
+code 0x0642 cal_adjust_slot        # calibration run: writes a newly measured value into the recipe's slot (mode 0-5)
+code 0x06F0 cal_recipe_ptr         # DPTR = cal_recipe_table + cal_recipe_offsets[function] + range*4 (current, 25h.6: range+2)
+code 0x0738 cal_recipe_offsets     # 14 x 16-bit offsets (ranges spill over into the next function's slice)
+code 0x76A2 cal_recipe_table       # 4-byte entries: recipe pointer, flags (bit7 = 2 records)
+code 0x0754 cal_record_layout      # field offsets of one record from header bytes h0 (2Eh), h1 (2Fh)
+code 0x078A cal_next_ptr           # fetch next 16-bit pointer of the current record field
+code 0x07A4 cal_ld_slot            # load a slot (XDATA) or ROM constant, with validity check
+code 0x082D cal_addr_copy2         # DPTR += 0x01CF
+code 0x0848 cal_addr_copy3         # DPTR += 0x039E
+code 0x0877 cal_write_all_copies   # write value to all three copies, refresh the three checksums
+code 0x091B cal_checksum_copy1     # B=0: store sum, else compare (sets 5Dh.0 on mismatch)
+code 0x0955 cal_checksum_copy2
+code 0x098F cal_checksum_copy3
+code 0x09DD sum16_xdata            # 16-bit additive sum of R1:R0 bytes at DPTR -> R3:R2
+code 0x09F0 cal_majority_repair    # byte-wise 2-of-3 vote over the copies, repairs the odd one, counts events
+code 0x0B25 cal_ctx_save           # IRAM 39h..5Fh -> XDATA 0x07A2
+code 0x0B34 cal_ctx_restore
+code 0x12A2 cal_compute_effective  # temp-compensate set 0 (and set 1 for Vpeak/VDC/CAP)
+code 0x12BD cal_temp_compensate    # zero_eff = K0 + K4*(T-K2), gain_eff = K1 + K5*(T-K3); T = internal_temp
+code 0x132D cal_swap_sets          # exchange cal_work_set0 and cal_work_set1
+code 0x1359 internal_temp_update   # new internal-temperature reading -> filtered internal_temp
+xdata 0x0200 cal_data_copy1
+xdata 0x03C8 cal_sum_copy1
+xdata 0x03CF cal_data_copy2
+xdata 0x0597 cal_sum_copy2
+xdata 0x059E cal_data_copy3
+xdata 0x0766 cal_sum_copy3
+xdata 0x0119 internal_temp         # float, relative internal temperature (measured via Vpeak circuit)
+xdata 0x015F cal_work_set0         # K0..K5 (6 floats) for the current range
+xdata 0x0177 cal_zero_eff
+xdata 0x017B cal_gain_eff
+xdata 0x017F cal_work_set1
+xdata 0x0770 cal_fallback_flags    # bits set when a coefficient used its default; also copy-2 repair counter
+xdata 0x07A2 cal_ctx_save_area
+
+# ================================================================ calibration run
+# CAL key held at reset -> P3.1 (TXD) low -> cal_enable (22h.5). CAL ON,n / SHIFT CHECK n ENTER -> cal_mode (22h.6),
+# cal_hot (27h.2) = n. ZERO key or TRG B,X -> trigger_pending (24h.3) -> each finished conversion runs the step.
+code 0x3E5B cal_mode_enter         # sets cal_mode, autorange off
+code 0x4449 cmd_cal                # CAL [ON[,n]|OFF] handler in task_keyboard (keyboard + remote share it)
+code 0x5D96 task_trigger           # ZERO key / TRG: sets trigger_pending
+code 0x0D8D cal_step_zero          # zero point: needs 3 stable readings (max 29); cold: K0 (+K2=T), hot: K4 slope
+code 0x0EE6 cal_step_gain          # gain point: cold: K1 (+K3=T), hot: K5 slope
+code 0x0EDF cal_fail               # A = fail code -> XDATA 0x0771, sets fail flag
+code 0x0B3E cal_classify_input     # zero vs gain point, level window, polarity, allowed by flags -> codes 1..9
+code 0x0B0B cal_point_flags        # flag byte of the recipe table entry (bit0 zero-cold,1 gain-cold,2 zero-Tref,3 gain-Tref,4 zero-hot,5 gain-hot,7 two sets)
+code 0x0CA6 cal_nominal_value      # nominal full-scale value of the range (from range limits and scale)
+code 0x0E1B cal_reading_stable
+code 0x3385 lcd_format_reading     # value -> LCD text buffer XDATA 0x0000; 'r' at pos 8 in cal mode, "NC" when uncalibrated
+bit 0x15 cal_enable                # 22h.5
+bit 0x16 cal_mode                  # 22h.6
+bit 0x3A cal_hot                   # 27h.2: 0 = CAL 0 (cold), 1 = CAL 1 (hot)
+bit 0x23 trigger_pending           # 24h.3
+xdata 0x076D cal_sum_err_copy2
+xdata 0x076E cal_sum_err_copy3
+xdata 0x076F cal_repair_copy1
+xdata 0x0771 cal_fail_code          # last calibration fail code (cal_fail); also copy-3 repair counter
+
+# ================================================================ remote command parser (0x77B6..0x7BCC, hand-written asm)
+# Input line in XDATA iface_rx_buf (0x0013 + rx_index 0Ch); rx_count 0Dh: bit7 line present, bit6 end of message, bits0-5 chars left.
+# Output token in parser context: 2Dh type, 2Eh command index, 2Fh flags (bit7 token ready, bit5 first param,
+#   bits0-2 kind: 0 OFF, 1 ON, 2 integer, 3 integer(b), 4 number, 5 none, 6 query; 0x70 = mnemonic), 30h-33h value.
+# cmd_table type byte: bit7 bare, bit6 second param after ',', bit5 query, bit4 mnemonic, bit3 number, bit2/1 integer, bit0 ON/OFF.
+code 0x77B6 parser_step
+code 0x7804 parser_reset
+code 0x7AE9 parser_end_token
+code 0x7B47 parser_emit_token      # 2Fh |= 0x80, wait for consumer
+code 0x7BBE parser_getc            # A = iface_rx_buf[rx_index]
+code 0x7B9A parser_is_letter
+code 0x7BB5 parser_is_digit
+code 0x3D6E cmd_param_first_char   # first character of a mnemonic parameter
+code 0x3F8E cmd_fnc_lookup         # FNC <mnemonic>: find function mnemonic in cmd_table
+code 0x4814 func_to_cmd_index      # current function -> mnemonic index (for FNC?, RSL)
+code 0x3D7F set_speed              # MSP n
+code 0x3F1D range_by_value         # RNG <number>
+code 0x4061 dbm_set_reference      # DBM <number>: 1e-4..9999, stored at XDATA 0x0075 (default 600)
+code 0x403A zer_set_reference      # ZER <number>
+code 0x3E8B cdp_write_slot         # CDP n,value: cal slot n -> XDATA 0x0200+4(n-1), all three copies
+code 0x5BBB rms_set_byte           # protected byte at 0x07FD (n, n+0x55, n-0x56)
+code 0x5B93 rms_get_byte           # validate/repair, default 'A'
+code 0x0ABF diag_clear_counters    # JCV (cal mode): clear 22 bytes from 0x076C
+code 0x41CC cmd_FNC
+code 0x41E3 cmd_RNG
+code 0x41E8 cmd_DBM
+code 0x4245 cmd_ZER
+code 0x42FD cmd_MIN
+code 0x430F cmd_MAX
+code 0x4321 cmd_CLM
+code 0x432D cmd_MSP
+code 0x4354 cmd_RSL
+code 0x43B6 cmd_TRG
+code 0x440D cmd_X
+code 0x44AB cmd_OUT
+code 0x44D2 cmd_JCV
+code 0x44F1 cmd_DMP
+code 0x44FA cmd_CDP
+code 0x456D cmd_RMS
+code 0x457E cmd_SIX
+code 0x458E cmd_CR
+code 0x459E cmd_IEE
+code 0x45C3 cmd_MTS
+code 0x45C6 cmd_EMO_TOL
+code 0x4618 key_range_down
+code 0x462E key_range_up
+code 0x4643 key_autorange
+data 0x0C rx_index
+data 0x0D rx_count
+xdata 0x0013 iface_rx_buf
+xdata 0x00DB parser_ctx
+xdata 0x01D1 parser_number
+xdata 0x00E8 reply_pending_cmd
+xdata 0x00E9 reply_items_left
+xdata 0x009C cdp_slot              # bit7 = slot selected
+xdata 0x0075 dbm_reference
+xdata 0x0079 zero_reference
+xdata 0x01CB funcswitch_step_count # measured by meas_phase_switch; MTS? reply
+xdata 0x07FD rms_byte
+
+# ================================================================ CDP? dump / settings bytes
+# Small triple-redundant settings area right after each cal-copy checksum: byte i at 0x03CA+i-1, 0x0599+i-1, 0x0768+i-1
+#   byte 1 = interface options/GPIB address (IEE), byte 4 = cal seal: 'N' normal, 'a' altered (set by CDP S, cleared by CDP R)
+code 0x5B1B nv_setting_read        # R2 = byte no.: 2-of-3 vote, repair; F0 = 1 if all copies differ
+code 0x5B67 nv_setting_write       # write A to byte R2 in all three copies
+code 0x5B74 cal_seal_check         # C=1 if seal byte = 'a' (cal data altered): ranges show NC, CDP? items flagged N
+code 0x5B86 cal_seal_normal        # CDP R: seal byte = 'N'
+code 0x5B8A cal_seal_altered       # CDP S: seal byte = 'a'
+code 0x4921 cdp_load_slot          # load slot (vote over the 3 copies); 23h.7 if no majority -> 'E'
+code 0x4A4F reply_put_3digits      # 3-digit decimal + ','
+code 0x485A reply_put_float        # format float (e.g. +1.250000E+00)
+code 0x49E3 reply_send
+code 0x4A06 reply_send_last        # (+CR if CR ON) mark end of message, send
+code 0x7C24 iface_send             # hand the reply buffer to the interface board
+xdata 0x03CA nv_settings_copy1
+xdata 0x0599 nv_settings_copy2
+xdata 0x0768 nv_settings_copy3
+
+# ================================================================ reading output (OUT S / OUT N)
+# "<mnemonic><D|sp><Z|C|sp><flag> <value>": D = dB mode, Z = zero/relative, C = calibration mode.
+# flag (priority): ? no reading yet, O overload, F cal fail, N not calibrated, U dB underflow,
+#                  R reading not settled, C crest factor exceeded, blank = normal
+code 0x4C58 reply_put_reading_header
+code 0x4A84 reply_put_reading_value
+code 0x1839 meas_build_status      # status byte 0 (56h): b0 crest(C) b1 overload(O) b2 cal fail(F) b3 unsettled(R) b4 uncal(N) b5 dB underflow(U) b7 no fresh conv.
+code 0x18AF meas_publish_result    # 0x0064/0x0065 status, 0x0085 value (float), 0x0066 |= 1 on any error
+code 0x3CD4 result_record_clear    # status1 bit3 = "no reading yet" ('?')
+code 0x3CEE result_restart
+code 0x1E6B meas_check_settled     # >9 unstable readings (29 in cal mode) -> 'R'
+code 0x17AC result_apply_db_rel    # dB conversion (reference XDATA 0x0075) and zero/relative subtraction (0x0079)
+xdata 0x0064 result_status0
+xdata 0x0065 result_status1        # bits4-6 range, bit3 no reading yet, bit7 10 A input
+xdata 0x0066 result_flags
+xdata 0x0085 result_value
+
+# ================================================================ interface link (option bus = i2cA), see manuals/06
+code 0x7D88 iface_read_message     # header b7=0: n = b0-4 data bytes + checksum -> iface_rx_buf; b6 = END
+code 0x7DA6 iface_rx_loop
+code 0x7E18 iface_send_reply_block # header 0x20|len (b6 END), reply_buf, checksum
+code 0x7E4F iface_send_identity    # E1: 0x60|len + version string (0x59A5) + checksum
+code 0x7E86 iface_handle_event     # FE talk, E1 identity, FF countdown, F5-F8 remote/local, F9 GET, FA DCL, FB/FD resend
+code 0x7F39 iface_write_ff         # FF = message received
+code 0x7F45 iface_start_write
+code 0x7F4B iface_start_read
+code 0x7F51 iface_send_f4_address
+code 0x7F56 iface_send_address     # C0 | GPIB address
+code 0x7F5C iface_write_ctrl       # single control byte R5
+code 0x7F63 iface_read_status      # read 1 (or 2 for 8x) status bytes
+code 0x7F8C iface_send_status      # 0x80 | (2Eh & 0x3F)
+code 0x7F9A iface_send_f1          # F1 xx
+code 0x7FA7 iface_addressed
+code 0x7FAE iface_mode_match
+code 0x7FBA iface_send_byte_ck     # add + rotate-right checksum, then send
+code 0x7FC1 iface_load_channel     # 3-byte channel descriptor (R4 config/address, R3 state, B flags) + context
+code 0x7CEC iface_save_channel
+
+# ================================================================ display (PCF8576 @ 0x70, internal bus) and keyboard (PCF8574 @ 0x48)
+code 0x5549 lcd_send_frame         # text buffer XDATA 0x0000 -> segments; header C8 86 E0 F8 70, 13 data bytes, annunciators
+code 0x57A2 lcd_encode_chars       # ASCII -> segment bytes via font, '.' merged into dp
+code 0x580C lcd_font_7seg          # 96 entries for ASCII 0x20-0x7F: bit7 d, 6 c, 5 a, 4 b, 3 dp, 2 e, 1 f, 0 g
+code 0x586C lcd_font_aux           # table for the 2-digit auxiliary field
+code 0x532B lcd_test_pattern       # power-up all-segments pattern (25 bytes)
+code 0x5934 key_scan               # debounced key number 0-15 -> 35h (FF = none)
+code 0x5984 key_read_matrix        # PCF8574: write F0/read, write 0F/read, OR
+code 0x5974 key_code_table         # 16 matrix codes
+code 0x5A84 key_debounce_delay
+code 0x2B31 key_jtab               # 16 x LJMP, key handlers store a command index for the executor
+code 0x2B61 key_0_vdc_speed
+code 0x2B87 key_1_vac_vrms
+code 0x2B94 key_2_vpeak_cycle
+code 0x2BA9 key_3_ohm2w_cont
+code 0x2BB6 key_4_ohm4w_temp
+code 0x2BC3 key_5_idc
+code 0x2BC8 key_6_iac
+code 0x2BCD key_7_cap_diode
+code 0x2BDA key_8_frq_speed
+code 0x2BFB key_9_time_cycle
+code 0x2C1B key_10_dbm
+code 0x2C3A key_11_zero
+code 0x2C6D key_12_status
+code 0x2C73 key_13_range_down
+code 0x2C78 key_14_range_up
+code 0x2C7C key_15_auto
+xdata 0x0000 lcd_text_buf
+
+# ================================================================ CHECK menu and stored settings
+# SHIFT + key 14 = CHECK: [CAL 0/1 in cal-enable] or [rTL, ADDr, T.ONLY, Cr with interface] then 60H, SOFT.
+# Settings bytes (nv_setting_*): 1 = iface config (b0-4 GPIB address, default 22; b7 talk-only),
+#   2 = mains (0x55 = 60 Hz), 3 = CR (0x55 = on), 4 = cal seal.
+code 0x5ACF nv_get_iface_config    # byte 1; invalid/31 -> 22 written back
+code 0x5AE3 nv_set_iface_config
+code 0x5AE9 mains_set_60hz         # SIX ON
+code 0x5AF5 mains_set_50hz         # SIX OFF
+code 0x5AED mains_load_setting
+code 0x5B02 cr_set_on              # CR ON: append \r to output
+code 0x5B0E cr_set_off
+code 0x5B06 cr_load_setting
+code 0x3FBA iee_store_address      # IEE n -> settings byte 1, tell the interface (C0|addr)
+code 0x4006 tol_set                # TOL ON/OFF (talk only, byte 1 bit 7); keyboard T.ONLY step
+code 0x3FF0 emo_set_count          # EMO n: output n readings (XDATA 0x0095)
+code 0x3FDE rtl_go_local           # rTL: clear remote state in the interface context
+code 0x3013 menu_show_step         # show a CHECK/edit menu message
+bit 0x14 mains_60hz                # 22h.4: T1 gate 16.667 ms instead of 20 ms
+bit 0x1D cr_enabled                # 23h.5
+bit 0x1A emo_continuous            # 23h.2: EMO A
+xdata 0x0095 emo_count
+
+# ================================================================ measurement internals
+code 0x2201 acq_vpeak              # Vpeak: T1=T2=0xF9A7, latch b5/b4 = +/- peak detector, up to 10 repeats, Vpp = both polarities
+code 0x22CE acq_adc                # default ADC path; AC functions first run a two-phase RMS auto-zero (latch b6 / shiftreg 08h b7)
+code 0x238C acq_time               # function 8
+code 0x23E1 acq_cap                # function 9
+code 0x24FF acq_freq               # function 10
+code 0x2698 meas_setup_analog      # after the switch settles: load cal coefficients, wait time, analog config per function/range
+code 0x29D0 analog_cfg_index       # 2 bytes per function: flags (b0 P3.1, b4 P1.4, b5 2Bh.3), base into analog_cfg_table
+code 0x29EC analog_cfg_table       # 3 bytes per range: shiftreg 08h, 09h, ADC latch 0Ah
+code 0x297D analog_cfg_flags
+code 0x288E meas_calc_wait_time    # T1 (XDATA 0x00F0) from mains setting and function
+code 0x27FA ac_autozero_phase_a
+code 0x2838 ac_autozero_phase_b
+code 0x1288 adc_count_minus_zero   # signed count = raw - T2 (29360, 2936 in SPEED 3); |count| >= T2 -> overload
+code 0x16DC cal_apply              # value = (count - zero_eff) * gain_eff (set 1 for negative VDC, Vp-, CAP in SPEED 3)
+code 0x16CC value_to_count         # inverse of count_to_value
+code 0x1636 fast_mode_drop_digit   # SPEED 3 (and FRQ SPEED 2): count / 10
+code 0x5C02 display_stabilize      # last-digit hysteresis against the previous count (XDATA 0x00D3/0x00D4)
+code 0x1DE7 input_step_detect      # count jump > 10 (VDC, degC) or > 1000: restart averaging
+code 0x7043 adc_count_time_norm    # 24-bit 29360
+code 0x7046 adc_count_time_fast    # 24-bit 2936
+xdata 0x00F0 adc_wait_time         # T1, 16-bit
+xdata 0x00FA prev_count
+xdata 0x00D3 stabilize_counter
+xdata 0x00D4 stabilize_prev
+xdata 0x0197 cal_zero_eff1
+xdata 0x019B cal_gain_eff1
+
+# ================================================================ timing functions (TMOD 0x15: T1 16-bit 1 us timer, T0 counts P3.4 edges)
+code 0x23A1 time_arm               # P3.1 = start slope, T0 = FFFF (first edge overflows), enable T0/T1 interrupts
+code 0x23C8 time_wait_stop         # start seen: stop-edge timeout 1Ch = 0xD7 passes
+code 0x1515 meas_process_time      # seconds = (T1 overflows*65536 + T1) * 1e-6; decade autorange; cal (timebase) applied
+code 0x14E9 time_read_counter
+code 0x161F time_range_limit       # 10^(range-1) s * 1.1 (manual-range overload)
+code 0x2413 cap_charge_start       # P1.5 low = discharge released, T1 times the charge until the comparator fires INT1
+code 0x2485 cap_wait_charge        # overrange when T1 passes 0xD1xx (0x62xx in SPEED 3)
+code 0x2A7F cap_range_table        # shift-register 09h per capacitance range
+code 0x2502 freq_gate_start        # T0 counts input edges; T1 gate: 16 x 65.536 ms (1.048576 s), 2x in SPEED 2, 10 ms quick gate
+code 0x2549 freq_gate_done
+code 0x7055 freq_corr_1s           # 1/1.048576
+code 0x7059 freq_corr_131ms        # 1/1.31072 (x10 scale)
+code 0x7049 freq_corr_latency      # variants 24 ppm smaller: gate-latency compensation (0x7049/0x704D/0x7051)
+bit 0x39 time_started              # 27h.1
+
+# ================================================================ number library, part 2 (probed in the emulator: tools/probe_lib.py)
+code 0x6796 fp_copy_r0_to_r1
+code 0x631D i24_to_fp              # in place, result 1 byte longer (R0 + 1)
+code 0x62B3 fp_to_i24_round        # round half away from zero, C=1 if result 0
+code 0x67EF fp_clr_r0
+code 0x680E fp_clr_r1
+code 0x67E0 fp_ld_max_r0           # 7F FFFFFF
+code 0x6417 fp_sqrt                # verified: 10 -> 3.162278, 2 -> 1.414214
+code 0x645D fp_log10               # ln(x) * 0.4342945
+code 0x646A fp_ln
+code 0x6AA0 i24_neg                # 0 - x
+code 0x6AA1 i24_neg_c
+code 0x6AC7 i24_neg_r1
+code 0x6A9B i24_abs
+code 0x5CF6 i24_abs_sign_f0        # F0 = sign, x = |x|
+code 0x6A34 i24_add                # verified 1000 + 7
+code 0x6CA9 i24_sub                # verified 1000 - 7
+code 0x6CAA i24_sub_core
+code 0x6AE7 i24_cmp_signed
+code 0x698A i24_div_signed
+code 0x6977 i24_round_r5
+code 0x6C73 i24_shl1               # verified 1000 -> 2000
+code 0x6C81 i24_sar1
+code 0x6C86 i24_shr1
+code 0x6C87 i24_rrc
+code 0x6C9A i24_shr1_r1
+code 0x6AB7 i24_shr8_ins_a         # shift right one byte, A in at the top
+code 0x6AAF i24_shl8_ins_a
+code 0x6ABF i24_shr8_ins_a_r1
+code 0x6CBE i24_test_r0            # A = OR of bytes (Z if zero)
+code 0x6CC6 i24_test_r1
+code 0x6CFA i24_inc_r0
+code 0x6D0C i24_inc_r1
+code 0x6CCE i24_dec_r0
+code 0x6CE4 i24_dec_r1
+code 0x6BC3 i24_ld_max_r0
+code 0x6BDB i24_st_r1_xdata
+code 0x6C54 i24_div10_rem          # remainder in A (used by put_digit)
+code 0x6D71 add16_r6r7_r4r5
+code 0x6D98 shl16_r6r7
+code 0x628B put_char_dptr          # MOVX @DPTR,A; INC DPTR
+code 0x62A9 put_char_repeat
+code 0x6270 put_sign_char          # '-' or '+' (R5.6)
+code 0x6284 put_digit
+code 0x6299 put_pad
+code 0x5F42 is_digit_r7
+code 0x5F4B fp_format              # float -> text (E-notation, digits/format in 2Fh/31h/35h)
+code 0x5E0A parse_number_xdata
+code 0x5E1A parse_number_char      # decimal number accumulator used by the command parser
+code 0x6B35 i2cB_read1_stop        # complete one-byte read (keyboard PCF8574)
+code 0x5D37 iface_current_poll
+code 0x5D91 trigger_clear
+code 0x5DF4 iface_ctx_load         # XDATA 0x00EA -> 2Eh/2Fh
+code 0x5DFF iface_ctx_save
+
+# ================================================================ display/menu helpers
+code 0x31C5 probe_hold_poll        # PCF8574 0x4E/0x4F on the option bus: bit7 = data-hold probe button (PM9267), writes LED bit
+code 0x3AE2 min_reset              # min (XDATA 0x007D) = +max float
+code 0x3B11 max_reset              # max (XDATA 0x0081) = -max float
+code 0x3DE8 speed_store            # SPEED -> XDATA 0x01CC (kept over power-off)
+code 0x3E14 speed_load
+code 0x3D51 kbd_cmd_finish         # common exit of all key/command handlers
+code 0x3D43 kbd_ctx_swap
+code 0x3B9A cal_show_status        # calibration mode: show the step codes 000000C/100000C/200000C/60000C
+code 0x3CB7 cal_status_or_dashes
+code 0x3B58 lcd_show_dashes        # " -------"
+code 0x3D2B jcv_set_ptr
+code 0x3D36 jcv_get_ptr            # one-shot: read and clear XDATA 0x009A/0x009B
+code 0x3E81 cdp_int_to_fp
+code 0x307D menu_show_dbm_ref      # format the dB reference (XDATA 0x0075) for the edit menu
+xdata 0x007D minmax_min
+xdata 0x0081 minmax_max
+xdata 0x01CC speed_saved
+xdata 0x009A jcv_ptr
+
+# ================================================================ batch: largest remaining functions
+code 0x1EA4 meas_postprocess       # SPEED 1 summing (0x0101/0x0104), digit drop, filter, cal_apply, count_to_value, cal step
+code 0x5BED meas_digital_filter    # (inferred) running filter on the count, state XDATA 0x00D3/0x00D7
+code 0x1872 minmax_update          # compare result with min (0x007D) / max (0x0081), store
+code 0x18EF meas_result_complete   # publish result, min/max values 0x0089/0x008D/0x0091, restart ADC
+code 0x1BB7 vpp_range_check        # Vpp: both polarity counts (0x0101/0x0104)
+code 0x1C20 cap_range_check        # capacitance branch of meas_range_checks
+code 0x1B74 autorange_apply        # step range, show dashes while ranging
+code 0x1FF0 result_convert_function # function-specific conversion (Pt-100 -> degC via pt100_r_to_temp, peak sign)
+code 0x27EE meas_settle_time_select # T0 settle time per function/range from 3-byte table 0x71D0..0x71EB
+code 0x3EB1 range_find_for_value   # RNG <value>: smallest range covering the value
+code 0x48A7 digits_for_range       # (inferred) digit count / decimal position from tables 0x6F04/0x6F14
+code 0x37AF lcd_decimal_point      # (inferred)
+code 0x38FE lcd_prepare_value      # (inferred) result (0x00F2) -> display value with range/resolution
+code 0x3A20 lcd_scale_value        # (inferred)
+code 0x3676 lcd_build_annunciators # (inferred) mode/speed/trigger annunciators (0x00A7/0x00A8)
+code 0x3598 lcd_unit_symbols       # per-function jump table 0x35C8 sets the unit annunciator bits
+code 0x35FF lcd_mode_symbols       # (inferred)
+code 0x3337 lcd_format_minmax      # (inferred) MIN/MAX value display
+code 0x30C3 menu_edit_digits       # (inferred) digit entry in the SHIFT edit menus
+code 0x6A59 i24_mul_signed         # 24x24 signed multiply (mant_mul24 + sign fix)
+code 0x550C db_log10_value         # dB: log10 wrapper with saved context (XDATA 0x01AA)
+code 0x7C52 iface_send_config_address # F4 + C0|address to the interface board
+code 0x000B vec_timer0
+code 0x0013 vec_int1
+code 0x001B vec_timer1
+
+# ================================================================ small functions, batch 1 (0x0000-0x1FFF)
+code 0x03B9 cal_lim_lo_from_xdata
+code 0x03C2 cal_lim_hi_from_xdata
+code 0x03CB cal_lim_lo_from_rom
+code 0x03D4 cal_lim_hi_from_rom    # limits for the coefficient checks at XDATA 0x079A/0x079E
+code 0x07A1 fp_ld_code_r0_thunk
+code 0x0812 cal_ld_slot_r1
+code 0x081C ret_peek_dptr          # fetch the caller's saved DPTR from the stack
+code 0x0863 cal_write_all_copies_safe
+code 0x08AB cal_write_verify       # write 4 bytes with read-back check
+code 0x08DF cal_check_limits_r1
+code 0x08FD cal_check_limits_r0
+code 0x09C9 sum16_store
+code 0x09CF sum16_compare
+code 0x0A41 cal_copy1_to_2
+code 0x0A55 cal_copy1_to_3
+code 0x0A69 cal_copy2_to_1
+code 0x0A7D cal_copy3_to_2
+code 0x0A91 xdata_copy
+code 0x0A95 cnt_sum_err_copy1
+code 0x0A9C cnt_sum_err_copy2
+code 0x0AA3 cnt_sum_err_copy3
+code 0x0AAA cnt_repair_copy1
+code 0x0AB1 cnt_repair_copy2
+code 0x0AB8 cnt_repair_copy3
+code 0x0ADC cal_set_slope_limits
+code 0x0CBE cal_nominal_from_range
+code 0x0CD8 cal_stability_window   # per-function window table 0x0D0B
+code 0x0D23 cal_gain_limit_check
+code 0x0D47 cal_slope_limit_check
+code 0x0D77 temp_in_range          # internal temperature within 0x70C5..0x70C9
+code 0x10D1 internal_temp_init
+code 0x10DB meas_set_function_flags # per-function jump table 0x10E9
+code 0x1113 meas_offset_select     # per-function 24-bit offset (current: XDATA 0x011D/0x0120)
+code 0x1450 internal_temp_delta_check
+code 0x146A internal_temp_filter
+code 0x149B adc_start_alt_mode
+code 0x14C1 meas_stop_and_reset    # timers/interrupts off, phase flags reset
+code 0x172E speed_force_fast       # some functions measure in SPEED 3 while ranging
+code 0x1746 speed_restore
+code 0x1760 autorange_enter_fast   # (inferred) remember speed, go fast while ranging
+code 0x177C autorange_leave_fast
+code 0x1789 autorange_count_step
+code 0x179E autorange_reset
+code 0x1995 range_can_go_up_saved
+code 0x1AB0 count_calibrated       # count -> value -> cal_apply -> count
+code 0x1E80 pt100_r_to_temp        # Callendar-Van Dusen inversion with fp_sqrt (constants 0x7071/0x7075/0x7079)
+
+# ================================================================ small functions, batch 2 (0x2000-0x47FF)
+code 0x2946 adc_latch_send_timed
+code 0x2FF5 menu_key_to_char
+code 0x3022 menu_exit_a            # save menu context (IRAM 2Bh.. -> XDATA 0x00A5) and leave
+code 0x302B menu_exit_b
+code 0x3052 menu_init
+code 0x306A menu_clear_state
+code 0x3074 lcd_dashes_refresh
+code 0x30AA menu_set_flag
+code 0x30AC menu_enter_edit
+code 0x30FC menu_start_blank
+code 0x313F menu_load_text
+code 0x3149 menu_blink_cursor
+code 0x315B menu_digit_key
+code 0x3185 put_2digits_iram
+code 0x319E menu_store_text
+code 0x31A8 menu_parse_number
+code 0x31B2 menu_set_value_ptr     # XDATA 0x0098
+code 0x32FC display_show_held_value
+code 0x3566 lcd_pad_spaces
+code 0x35F6 lcd_copy_range_bits
+code 0x3724 lcd_round_value
+code 0x3742 lcd_set_sign
+code 0x374B lcd_insert_unit_char
+code 0x375F display_timer_init     # XDATA 0x009F..0x00A3
+code 0x3773 lcd_clear_flags
+code 0x377C value_is_signed        # C=1: value shown with sign (VDC, IDC, degC, Vp+, Vp-, or dB/rel/cal-enable); verified
+code 0x3785 func_class_check       # (inferred) C depends on function/peak/dB state
+code 0x37A7 code_to_iram_copy
+code 0x37F2 lcd_show_msg_thunk
+code 0x384F resolution_digits      # digits per function/speed, table 0x6E40 (also used by RSL ?)
+code 0x387A range_decimal_pos      # decimal point per function/range, table 0x6DC0
+code 0x388E fp_cmp_ten
+code 0x38A2 out_format_params_a    # (inferred) field parameters depending on interface/function
+code 0x38D0 out_format_params_b
+code 0x3A79 func_change_hook       # (inferred) per-function setup (continuity special case)
+code 0x3B40 cal_step_allowed       # flags for the current range and cold/hot
+code 0x3B68 cal_msg_000000C
+code 0x3B72 cal_msg_100000C
+code 0x3B7C cal_msg_200000C
+code 0x3B90 cal_msg_60000C
+code 0x3CC3 trigger_restart_measure
+code 0x4088 cdp_slot_valid         # 1..114 (ROM 0x6FB9)
+code 0x6DC0 range_decimal_table
+code 0x6E40 resolution_table
+
+# ================================================================ small functions, batch 3 (0x4800-0x7FFF)
+code 0x484A reply_value_cmp_ten
+code 0x4870 reply_decimal_pos
+code 0x489B reply_ld_value
+code 0x4936 reply_after_reading    # clear "new result" flag, restart if not triggered
+code 0x4955 reply_put_value_field
+code 0x4A20 reply_put_2digits
+code 0x4A7E reply_nc_check
+code 0x4D1B reply_init
+code 0x54D7 lcd_show_error
+code 0x54F8 func_is_time_or_cont
+code 0x5B49 nv_addr_copy1          # 0x03CA + n - 1
+code 0x5B51 nv_addr_copy2          # 0x0599 + n - 1
+code 0x5B59 nv_addr_copy3          # 0x0768 + n - 1
+code 0x5BCB filter_init            # XDATA 0x00CC / stabilizer = max
+code 0x5CBA lcd_copy_message       # '#'-terminated ROM string -> lcd_text_buf
+code 0x5D40 iface_report_status    # result/trigger state -> interface status byte
+code 0x5DF2 ret_clc
+code 0x5DF3 ret_nop
+code 0x671C fp_exp_add             # exponent arithmetic for mul/div, over/underflow
+code 0x6748 fp_round_normalize
+code 0x682D fp_push_r0             # push float @R0 on the stack (keeps return address)
+code 0x684C fp_push_r1
+code 0x698E i24_div_signed_core
+code 0x6A49 i24_add_r345
+code 0x6C72 clc_thunk
+code 0x77AE parser_restart
+code 0x77D7 rx_clear
+code 0x7813 parser_set_table_ptr
+code 0x78FB parser_next_entry      # cmd_table entry = 5 bytes
+code 0x7954 parser_flag_kind4
+code 0x7AC3 rx_consume_char
+code 0x7AC8 rx_insert_char
+code 0x7B61 parser_set_kind
+code 0x7B91 parser_insert_terminator
+code 0x7BA6 parser_sign_char
+code 0x7C43 iface_clear_remote
+code 0x7D83 iface_set_resend
+code 0x7DB6 iface_poll_once        # read status; message -> iface_read_message, else iface_handle_event
+code 0x7E49 iface_reply_done
+code 0x7EFA iface_merge_mode_bits
+code 0x7F69 iface_status_decode
+
+# ================================================================ Ghidra-split entry points (labels inside functions)
+code 0x133C internal_temp_from_count # 200000 / count -> XDATA 0x00EC
+code 0x13BA internal_temp_track    # two references XDATA 0x00CD / 0x00D0
+code 0x1750 autorange_finish_common
+code 0x18D5 hold_store_result      # held status 0x0067/0x0068, value 0x0089
+code 0x24F4 acq_done               # conversion finished (2Eh.1 -> 2Eh.2)
+code 0x3193 menu_edit_value
+code 0x357C lcd_append_nc          # "NC" at text positions 7-8
+code 0x4D12 reply_abort
+code 0x5463 task_remote_parse_tail
+code 0x5D5F iface_status_compose   # status byte: b0 reading/reply pending, b1 24h.6, b4 result flag 3, b7 kept
+code 0x781D parser_dispatch_char   # ';' and ',' handling, then per-state jump table 0x7867
+code 0x7901 parser_st_header
+code 0x790A parser_st_param_start
+code 0x798E parser_st_mnemonic
+code 0x79A3 parser_st_mnemonic_more
+code 0x79C2 parser_st_on_off
+code 0x79D5 parser_st_number
+code 0x7A32 parser_st_digits
+code 0x7A93 parser_number_accumulate
+code 0x7ABD parser_st_query
+code 0x7B51 parser_end_reset
+code 0x7B5C parser_end_param
+code 0x7B6E parser_end_param1
+code 0x7B7D parser_end_param2
+code 0x7C12 iface_send_status_now
+code 0x7DBE iface_rx_complete      # rx_index = 0, rx_count = header | 0x80
