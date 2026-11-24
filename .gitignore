@@ -1,0 +1,30 @@
+# Copyrighted factory material: supply your own dumps and manuals
+firmware/*.BIN
+firmware/*.bin
+firmware/reference_S08/
+manuals/*.pdf
+manuals/*.txt
+
+# Personal meter data (calibration RAM dumps)
+backup/
+
+# Ghidra project and generated listings (rebuilt by tools/run_all.ps1)
+ghidra_project/
+out/*
+!out/*.md
+
+# Build output
+fw/out/
+fw/out_ref/
+fw/out_tl/
+fw/out_shrink/
+*.ihx
+*.rel
+*.rst
+*.lst
+*.sym
+*.map
+
+# Python
+__pycache__/
+*.pyc

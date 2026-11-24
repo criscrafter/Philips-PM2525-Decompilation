@@ -1,0 +1,701 @@
+# PM2525 S25 firmware decompilation: status
+
+Target: `firmware/PM2525_S25.BIN` (PM2525/3, software S25, Intel 8031AH, 32 KB EPROM).
+Reference: `firmware/reference_S08/PM2525_S08_ko4bb.BIN` (PM2525/0, S08).
+
+## Outputs (`out/`)
+
+| File | What it is |
+|---|---|
+| `PM2525_S25_ghidra.c` | Ghidra 12.2 C decompilation of every function (495 decompiled, 1 failed) |
+| `PM2525_S25.asm` | Full annotated disassembly (my tracer), labels from `tools/s25.sym` |
+| `PM2525_S08.asm` | Same for S08 |
+| `s25_profile.txt` | Per-function profile: size, callers, SFR/bit/xdata use, strings, callees |
+| `match_s25_s08.csv` | S25 to S08 function mapping (address, method, similarity) |
+| `S08_vs_S25_diff.md` | Instruction-level diff of every changed function, plus the new S25 functions |
+
+Rebuild everything: `powershell -ExecutionPolicy Bypass -File tools\run_all.ps1`.
+Naming lives in `tools/s25.sym` (`code`/`data`/`bit`/`xdata ADDR name # comment`). Add names there and rerun.
+Code labels and RAM/bit names are applied after Ghidra's auto-analysis (`ApplyLabels.java`); applying
+them earlier makes Ghidra split jump-table targets into separate functions.
+
+## Coverage
+- 28,748 of 32,768 bytes traced as code (88%), 13,531 instructions, 452 functions, 14 computed-jump
+  tables resolved, 0 trace errors. Most of the remaining ~4 KB is tables and strings (e.g. 0x6DAB–0x77AD).
+- Ghidra: all functions decompiled except `sub_77B6` (Ghidra's decompiler process crashes; use the .asm).
+  The jump table at 0x5011 (inside `task_remote_reply`) is not yet applied in Ghidra, so that
+  switch may show as unresolved there.
+
+## Hardware map (from code, cross-checked with the 1993 service manual)
+| Resource | Use |
+|---|---|
+| P1.1 / P3.2 (INT0) | I²C bus A, SDA / SCL (bit-banged, clock-stretch aware). Devices: 0x4E (PCF8574), 0x58–0x5E (interface-board controller) |
+| P1.7 / P3.5 (T1) | I²C bus B, SDA / SCL. Devices: 0x70 PCF8576 LCD driver, 0x48 PCF8574, 0x80/0x82/0x84/0x8B write + 0x8D read = OQ0071 ADC interface (group 8, command in low nibble) |
+| P1.7 / P3.5 + P1.3 | Same lines also clock the analog-section shift registers (`shiftreg_write_analog`, latch = P1.3 pulse) |
+| P1.0 | Serial input read by `shiftreg_in_byte` (8 bits, clocked by T1) |
+| INT1 | Edge gate for time/frequency measurement (stops T0, starts T1) |
+| Timer 0 / Timer 1 | Measurement timing / counting |
+| XDATA 0x0034.. | Remote reply buffer; 0x0053/0x0056 interface channel descriptors; 0x00A2 down-counter |
+
+## Program structure
+`start` (0x51FA) → `system_init` → `iface_boot_handshake` → `main_loop` (0x002B), which on every pass:
+polls the interface board, then runs `task_543C`, `task_display_menu`, `task_keyboard`, `task_5468`,
+`task_5D96`, `task_5D02`, `task_measure`, `task_display_update` (every 50 passes) and `task_remote_reply`.
+
+Remote commands (table `cmd_table` at 0x59B1, 5-byte entries): function codes
+VPU VPL VPP VDC VAC VRM RFW RTW IDC IAC TPP TPN TNP TNN CAP FRQ TDC DIO CON, then commands
+FNC RNG DBM ZER MIN MAX CLM MSP RSL TRG X CAL OUT JCV DMP CDP RMS SIX CR IEE MTS EMO TOL.
+
+## Measurement engine and ADC (named 2026-11-24)
+
+**Meter state byte `meter_state`, IRAM 0x20:** bits 0–3 = function number, bits 4–6 = range,
+bit 7 = autorange. It boots as 0xA1 (VDC, range 2, autorange on).
+
+**Function numbers.** Decoded from the function-select jump table `fnsel_jtab` (0x465D) in
+`task_keyboard`: index 0x00–0x12 = the remote mnemonics from `cmd_table`, each handler sets
+`fnsel_new_function` (3Ah) plus mode bits. Cross-checked against the operator manual's function list and
+against `funcswitch_pos_table` (0x29C2, the motor-switch position each function needs).
+
+| # | Function | Remote mnemonic(s) | Switch pos. | Extra mode bits |
+|---|---|---|---|---|
+| 0 | V peak | VPU (Vp+), VPL (Vp−), VPP (Vpp) | 0x10 | 21h.7/21h.6 = 01 / 10 / 11 |
+| 1 | V DC | VDC | 0x10 | |
+| 2 | V AC | VAC | 0x08 | |
+| 3 | V rms (VRM; probably AC+DC, unconfirmed) | VRM | 0x10 | |
+| 4 | Ω 4-wire | RFW (R Four Wire) | 0x40 | |
+| 5 | Ω 2-wire | RTW (R Two Wire) | 0x20 | |
+| 6 | I DC | IDC | 0x02 (range-dependent) | |
+| 7 | I AC | IAC | 0x02 (range-dependent) | |
+| 8 | Time interval | TPP, TPN, TNP, TNN | 0x10 | 21h.5 = start on negative slope, 21h.4 = stop on negative slope |
+| 9 | Capacitance | CAP | 0x20 | |
+| 10 | Frequency | FRQ | 0x04 | |
+| 11 | Temperature °C (Pt-100) | TDC | 0x40 | |
+| 12 | Diode | DIO | 0x20 | |
+| 13 | Continuity | CON | 0x20 | |
+
+So the timer-based functions found in the ISRs are 8 = time interval, 9 = capacitance and
+10 = frequency. The switch positions group by input path: voltage-type functions share 0x10, 4-wire
+resistance and the Pt-100 temperature input (also 4-wire) share 0x40, and 2-wire resistance, capacitance,
+diode and continuity share 0x20. (Corrected 2026-11-24: RFW/RTW were swapped in the first version of this table.)
+
+**`task_measure` (0x1009)** runs once per main-loop pass as a state machine:
+1. Swaps in its 14-byte context (XDATA 0x00BE–0x00CB ↔ IRAM 0x2A–0x37; most flag bits live there).
+2. Dispatches on the phase bits:
+   - **2Ch.0 `meas_phase_switch` (0x259E):** look up the required switch position for the function
+     (`funcswitch_pos_table`, 0x29C2), read the actual position (`funcswitch_read_pos`, P1.0), and run the
+     switch motor (direction = shift-register bit 09h.1) until they match. Then strobe the analog
+     latches and start a settle time on Timer 0.
+   - **2Ch.1 `meas_phase_acquire` (0x213B):** load the ADC wait/count times and start a cycle. Functions
+     0/8/9/10 take their own paths (time/frequency use INT1 as the gate and Timer 0/1 as counters).
+   - **2Ch.2 `meas_phase_process` (0x2092):** scale the raw count (`meas_scale_result`), autorange
+     (`autorange_decide`), check range, and store the float result (XDATA 0x00F2).
+   - No phase flag set: log diagnostic event 0x0C and restart.
+3. Saves the context back (`meas_exit`).
+
+A watchdog counter (12h/13h, 0x0420 passes) logs event 0x0B if the ADC never reports READY.
+`diag_count_event` keeps per-event counters at XDATA 0x0772+id and a total at 0x076C.
+
+**OQ0071 ADC interface commands** (I²C bus B, high nibble 8 = group, low nibble = command):
+
+| Byte | Use | Routine |
+|---|---|---|
+| 0x80, 0xD0, latch byte | write the 8 output latches (input sensitivity, beeper) | `adc_write_latches` |
+| 0x82, hi, lo | wait time T1 | `adc_set_times` |
+| 0x84, hi, lo | count time T2 | `adc_set_count_time` |
+| 0x89 / 0x8B | start a conversion cycle (0x8B in alternate mode 26h.6) | `adc_start_cycle` |
+| 0x8D (read) | read the 16-bit counter into 0Fh:0Eh (10h cleared) | `adc_wait_ready_read` |
+
+READY is polled on the INT1 pin (low = ready). Each cycle start also rewrites bit 0 of the PCF8574 at
+bus-A address 0x4E (= NOT 26h.6). That bit probably selects the input polarity (auto-zero), but this is
+not confirmed.
+
+**Other hardware found here:** P1.2 is pulsed throughout the code and by the Timer 0 ISR. This is almost
+certainly the external watchdog retrigger.
+
+**Float format** (library at 0x6500–0x6DFF): byte 0 = sign (bit 7) + exponent (bias 62), bytes 1–3 =
+mantissa with an explicit leading 1, value = m/2²⁴ · 2^(e−62), zero = exponent byte 0. Operands live in
+internal RAM with R0/R1 pointing at the exponent byte. Named so far: `fp_add`, `fp_sub`, `fp_rsub`,
+`fp_mul`, `fp_div`, `fp_cmp`, load/store variants, `fp_ld_pow10_r1` (10^A from the table at 0x68DF), and
+24-bit integer helpers (`i24_*`). Confirmed by decoding the constants: 0x6FD8 = 9999, 0x6FD4 = 1e-4,
+0x6FCC = 1e12, and the 0x68DF table = 1e-18 … 1e19.
+
+### Ranges
+
+Full table: [`out/range_table.md`](out/range_table.md), generated by `tools/range_table.py` from the image.
+
+- **Range number** = `meter_state` bits 4–6 (0–7). **Displayed value = count × 10^(base + range)**
+  (`range_scale_exp` 0x165A, `count_to_value` 0x16BA). Bases: Vpeak −4, V −5, Ω −2, I −11, C −14,
+  f −3 (−4 in range 6), °C −1, diode −4, continuity −2, time 0.
+- **Valid ranges:** `valid_range_masks` (0x6ED4), one byte per function and SPEED setting, bit r = range r allowed.
+- **SPEED setting** = IRAM 21h bits 0–1 (the VDC speed is kept in XDATA 0x01CC across power-off; other functions get a default when selected: °C → SPEED 1, continuity → SPEED 3, others → SPEED 2): 0 = SPEED 1 (high
+  resolution), 1 = SPEED 2 (normal, default), 2 = SPEED 3 (high speed). The manual confirms
+  SPEED 3 for VDC and SPEED 1 for °C, and gives high-speed resolutions for capacitance, current and Ω that
+  fit these masks. The masks additionally allow continuity only in SPEED 3 and frequency only in SPEED 1/2;
+  the manual doesn't state those.
+- **Autoranging** (`autorange_step` 0x1AFE): `range_param_lookup` loads three 24-bit count limits per
+  function: range down below `range_lim_down`, up at `range_lim_up`, overload at `range_lim_overload`.
+  Typical: 1800 / 20000 / 21000. The 1000 V range (range 4, meter_state bit 6) is capped at 10000 / 11000;
+  Vpeak uses 180 / 2000 / 2100. Frequency has its own gate-time autorange (`freq_autorange` 0x1C86).
+
+| Function | Ranges (full scale) |
+|---|---|
+| V DC | 200 mV, 2 V, 20 V, 200 V, 1000 V |
+| V AC, V rms | 200 mV … 1000 V (SPEED 2/3 only) |
+| V peak | 2 V, 20 V, 200 V, 1000 V (2000 counts, SPEED 2 only) |
+| Ω 4-wire | 200 Ω … 2 MΩ |
+| Ω 2-wire | 200 Ω … 200 MΩ |
+| I DC, I AC | 1 µA … 100 mA (10000 counts); on the 10 A input (flag 25h.6) the base becomes −9, so ranges 5/6 read 1 A / 10 A |
+| Capacitance | 20 nF … 2000 µF (SPEED 3: 20 nF … 20 µF) |
+| Frequency | 10 kHz … 10 MHz, plus 20 MHz in range 6 (SPEED 1/2) |
+| Time interval | 1 s … 100000 s by decade (overload at 1.1×), 1 µs resolution |
+| Temperature | one range, 0.1 °C per count, limit 4000 counts |
+| Diode | 2.1 V |
+| Continuity | 210 Ω (SPEED 3) |
+
+Caveat: the count limits above are the ones `range_param_lookup` loads. In SPEED 1 the displayed
+resolution is probably finer (`meas_scale_result` reads the speed bits). Time interval is measured
+directly in seconds with a 1 µs timer (see "Timing and frequency").
+
+**Resolved 2026-11-24:** 0x1DE7 restarts averaging after an input jump (`input_step_detect`), 0x1E6B
+flags 'R' after too many unstable readings, 0x1EA4 is the SPEED 1 summing, filtering and calibration
+step (`meas_postprocess`). See "Findings from the hand-cleaned source" below.
+
+## Calibration data (decoded 2026-11-24)
+
+**The calibration constants are not in the EPROM.** They live in the battery-backed external RAM, which
+is why the service manual says a defective RAM needs a full recalibration. Re-burning or replacing the
+EPROM therefore keeps the meter's calibration; losing the RAM contents (battery, RAM chip) erases it.
+
+**Storage: three identical copies** of a 456-byte block (114 float slots), each followed by a 16-bit
+additive checksum:
+
+| Copy | Data | Checksum |
+|---|---|---|
+| 1 | XDATA 0x0200–0x03C7 | 0x03C8 |
+| 2 | 0x03CF–0x0596 (copy 1 + 0x1CF) | 0x0597 |
+| 3 | 0x059E–0x0765 (copy 1 + 0x39E) | 0x0766 |
+
+`cal_load_range` (0x0111) verifies all three checksums on every range change. If one copy is bad it is
+rewritten from a good one; if all three disagree, `cal_majority_repair` (0x09F0) votes byte by byte
+(2 of 3) and repairs. Each repair bumps a counter in XDATA 0x076C–0x0771. `cal_write_all_copies`
+(0x0877) writes all three copies and refreshes the checksums after a calibration step.
+
+**Recipes.** For each function and range, `cal_recipe_ptr` (0x06F0) points into `cal_recipe_table`
+(0x76A2) at a small ROM "recipe". The recipe names which RAM slots (or ROM constants such as 10, 100, 0.5)
+form the coefficients of one or two **coefficient sets**. Each set has six coefficients:
+
+| | Meaning | Default when uncalibrated |
+|---|---|---|
+| K0 | zero offset | 0 |
+| K1 | gain (may be a product/ratio of slots) | 1 |
+| K2 | reference temperature for the zero | 0.5 |
+| K3 | reference temperature for the gain | 0.5 |
+| K4 | zero temperature slope | 0 |
+| K5 | gain temperature slope | 0 |
+
+`cal_temp_compensate` (0x12BD) applies them with the instrument's internal temperature T (XDATA 0x0119,
+measured through the Vpeak circuit, as the service manual describes):
+
+    zero_eff = K0 + K4 · (T − K2)        gain_eff = K1 + K5 · (T − K3)
+
+This is what the two-temperature (cold + hot) calibration produces: the value at the cold reference plus
+a linear slope from the hot point. Uncalibrated slots fall back to the defaults and set bits in
+XDATA 0x0770.
+
+**Second set.** Vpeak, VDC and capacitance have a second set (table flag bit 7), swapped in by
+`cal_swap_sets`. It is the other polarity: for Vpeak it is the Vp− coefficients. For VDC only the gain
+differs, as gain_neg = gain_pos × (x278 / x264), i.e. every range reuses the −20 V/+20 V gain ratio. This
+matches the manual, where −20 VDC (adjustment 32) is the only negative DC voltage adjustment.
+
+Full per-range slot map and coefficient expressions: [`out/cal_recipes.md`](out/cal_recipes.md)
+(generated by `tools/cal_recipes.py`). All 67 function/range entries decode, and together they reference
+113 distinct slots.
+
+**Some slot ↔ manual adjustment matches** (inferred from the recipe structure, not yet confirmed by
+tracing a calibration run): x230/x234 = 200 mVDC zero/gain (adj. 23/29), x278 = −20 VDC gain (adj. 32),
+x200/x204 and x218/x21C = Vp+ / Vp− zero and gain (adj. 27/33 and 28/34), x388 = timebase used by
+frequency and time (adj. 10, 1 MHz), x38C–x3A0 = Pt-100 temperature (adj. 17/18).
+
+### Calibration run (decoded 2026-11-24)
+
+1. **Enable.** Holding CAL while releasing RESET pulls P3.1 (TXD) low during `start`, which sets
+   `cal_enable` (22h.5); the display shows CAL.
+2. **Select cold/hot.** `CAL ON,n` from the interface, or SHIFT CHECK n ENTER on the keyboard (both go
+   through the same handler, `cmd_cal` 0x4449), sets `cal_mode` (22h.6, autorange off) and
+   `cal_hot` (27h.2) = n: 0 = CAL 0 cold, 1 = CAL 1 hot.
+3. **Trigger.** The ZERO key or `TRG B,X` sets `trigger_pending` (24h.3, in `task_trigger`). From then
+   on, every finished conversion runs one calibration step in the result processing (`sub_1EA4`).
+4. **Classify** (`cal_classify_input` 0x0B3E). A reading below 0.099 × the range's nominal value is a
+   **zero** point; otherwise it is a **gain** point and must fall in a window around nominal
+   (e.g. 0.90–1.10 × nominal, wider for some functions). A negative input on VDC, or Vp−, selects
+   coefficient set 1. The step must be allowed by the range's flag byte (table below).
+5. **Measure** (`cal_step_zero` 0x0D8D / `cal_step_gain` 0x0EE6). The step waits for three consecutive
+   readings that agree (giving up after 29 tries), then:
+   - **cold:** writes the zero (K0) or gain (K1), plus the current internal temperature as that
+     coefficient's reference temperature (K2/K3) if the flags ask for it;
+   - **hot:** computes the slope (new value − cold value) / (T − T_ref) and writes K4 or K5. It refuses
+     if the temperature differs from the cold calibration by less than 0.01 (relative units).
+   Each write goes to all three RAM copies with fresh checksums (`cal_adjust_slot` 0x0642 →
+   `cal_write_all_copies`), then the range's coefficients are reloaded.
+6. **Display.** In calibration mode `lcd_format_reading` appends **r** to the value. A failure stores
+   a code in XDATA 0x0771 (`cal_fail`) and sets a fail flag. The display then shows **` FAIL `** (message 0x70FF, chosen
+   from the reading's status bit 'F'). Outside calibration mode,
+   uncalibrated ranges show **NC** ("no cal", as in the manual).
+7. **Leave.** `CAL OFF` once clears `cal_mode` (back to cal-enable); a second `CAL OFF` clears
+   `cal_enable` (normal measuring). RESET or power-off also ends it.
+
+**Fail codes** (XDATA 0x0771):
+
+| Code | Meaning |
+|---|---|
+| 1 | Vpeak/peak-peak input check failed |
+| 2 / 3 | gain point: reading below / above the allowed window |
+| 4 / 5 | wrong polarity for this function |
+| 6 / 7 | zero calibration not allowed here (cold / hot) |
+| 8 / 9 | gain calibration not allowed here (cold / hot) |
+| 0x0B | hot zero slope out of limits |
+| 0x0C | hot calibration: temperature too close to the cold reference |
+| 0x0E | cold gain out of limits |
+| 0x10 / 0x11 | hot gain / gain slope out of limits |
+| 0x12 | reading never settled (29 tries) |
+| 0x21 | zero step not possible in this function/state |
+| 0x22 | internal temperature outside the allowed range |
+
+Codes 1–9 come from the classifier; the rest from the two step routines. Code 0x15 (reading
+overloaded or not settled during a step) comes from `meas_postprocess`. **"nA"** is drawn by
+`cal_show_status` (0x3B9A): when the range has no step for the selected cold/hot calibration
+(`cal_step_allowed` returns C = 1), the last two characters of the status code become `NA`. In that
+case the ZERO key / `X` trigger is also refused.
+
+**Calibration points.** The flag byte of each range (bit 0 zero-cold, 1 gain-cold, 2/3 store zero/gain
+reference temperature, 4 zero-hot, 5 gain-hot, 7 two sets) defines what can be calibrated. There are 30
+calibratable entries, and they match the service manual's adjustment overview (numbers 10–47 including
+12a/b and 14a/b/c) one-to-one, including which points are cold-only (10, 13, 35, 37, 44–47). The full
+table with adjustment numbers is at the top of [`out/cal_recipes.md`](out/cal_recipes.md).
+The only difference: the firmware also allows a hot gain step for 2 VAC (adj. 36), which the manual
+scan shows as cold-only. That may be an OCR loss.
+
+**Still open:** whether the calibration RAM can be read out over the interface.
+
+## Remote commands (decoded 2026-11-24)
+
+The interface board (GPIB /51 or RS-232 /61) passes each received line to the meter over I²C bus A.
+It lands in XDATA `iface_rx_buf` (0x0013); `rx_count` (IRAM 0Dh) holds the length, with bit 7 =
+line present and bit 6 = end of message. `main_loop` calls `task_remote_parse` (0x543C), which runs
+the hand-written parser (`parser_step` 0x77B6 … 0x7BCC) one character per pass. Each finished token is
+executed by the same dispatcher as the front-panel keys (`fnsel_dispatch` in `task_keyboard`); queries
+are answered by `task_remote_reply` (0x4D2B).
+
+**Verified by running the real parser** in an 8051 emulator (`tools/emu8051.py`, driver
+`tools/parse_cmd.py`; the emulator was self-checked against the float library first):
+- Commands are 3 letters, case-insensitive; `;` separates commands; `?` makes a query.
+- Parameter kinds: ON / OFF, a mnemonic (kept as text: `FNC VDC`, `RNG AUTO`, `TRG B`), an integer,
+  or a decimal number with sign and exponent (`RNG 2.5E3`, `RNG -3`).
+- A second parameter after `,` is accepted only where the command table allows it
+  (`CAL ON,0`, `ZER ON,1.5`, `DBM ON,600`, `CDP ON,2`); otherwise it is ignored.
+
+**Command table type byte** (`cmd_table` 0x59B1, 5-byte entries: 3 letters, type, index):
+bit 7 = allowed without parameter, bit 6 = second parameter after ',', bit 5 = query allowed,
+bit 4 = mnemonic parameter, bit 3 = decimal number, bits 2/1 = integer, bit 0 = ON/OFF.
+
+| Command | Accepts | Effect (handler) | Query reply |
+|---|---|---|---|
+| VPU … CON (19) | – | select function directly (see function table) | – |
+| FNC | mnemonic, `?` | select function by mnemonic (`FNC VDC`) | current function mnemonic |
+| RNG | number, `AUTO`, `?` | range by value (autorange off) / autorange on | `AUTO` or range value (e.g. `20.E+06`) |
+| DBM | ON/OFF, number, `ON,n`, `?` | dB mode (voltage functions only); number = reference impedance 1e-4…9999 (default 600) | `OFF,`/`ON,` + reference |
+| ZER | ON/OFF, number, MIN/MAX, `ON,n`, `?` | relative/zero mode; reference = number or the min/max reading | `OFF,`/`ON,` + reference |
+| MIN, MAX | bare, `?` | show minimum / maximum | `,` + value |
+| CLM | bare | clear min/max | – |
+| MSP | integer 1–3, `?` | measuring speed (SPEED 1–3) | speed digit |
+| RSL | integer, `?` | resolution (digits); mapped to a speed via a per-function table | digits |
+| TRG | `I`/`B`/`E`, `?` | trigger source: internal, bus, external | `I`/`B`/`E`/`?` |
+| X | bare, `1` | trigger one measurement (bus/external trigger), e.g. `TRG B,X` | – |
+| CAL | ON/OFF, `ON,n`, `?` | calibration mode, n = 0 cold / 1 hot (needs CAL key at reset) | `ON,0` / `ON,1` / ` OFF` |
+| OUT | `S`/`N`, `?` | sets/clears flag 22h.7 (`N` refused in cal mode); meaning not decoded | `S`/`N` |
+| JCV | address (16-bit decimal), bare, `?` | `JCV <addr>` sets a one-shot XDATA read pointer; bare in cal mode clears the 22 error counters | **6 bytes at that address** (default 0x076C, the error counters) as `ddd,ddd,…`: a RAM peek |
+| DMP | bare, `?` | select display mode (meaning not decoded) | **status dump**: FNC, RNG, DBM, ZER, MSP, RSL, TRG, CAL, OUT, CR, SIX replies in one `;`-joined message |
+| CDP | `n`, `n,value`, `R`/`S`, `?` | **calibration mode only:** `CDP n,value` writes cal slot n (1–114, all three copies); `CDP S`/`CDP R` set/clear the "calibration altered" seal | **all 114 cal slots, one message per slot** (see below) |
+| RMS | integer, `?` | calibration mode only: **AC zero offset** in counts, subtracted from VAC/Vrms/IAC readings (÷10 in SPEED 3); stored triple-checked at 0x07FD, fallback 65 | the value |
+| SIX | ON/OFF, `?` | **mains frequency**: ON = 60 Hz, OFF = 50 Hz (stored, sets the 16.667/20 ms integration time) | ` ON`/`OFF` |
+| CR | ON/OFF, `?` | append `\r` to every output (stored) | ` ON`/`OFF` |
+| IEE | integer 0–30, `?` | GPIB address | address |
+| MTS | `?` only | – (new in S25) | motor-switch centring value (XDATA 0x01CB): half the measured width of a switch contact, in settle-timer periods. After reaching a position the motor runs this many more periods to centre the wiper |
+| EMO | bare, `n`, `A` | enable measurement output: one reading, n readings (count at 0x0095) or continuous (`A`) | – |
+| TOL | ON/OFF | talk-only (settings byte 1 bit 7, also the T.ONLY step in CHECK); shares the EMO handler | – |
+
+Indices 0x2A–0x2C are internal codes for the RANGE down / up / AUTO keys; 0x30 marks end of message.
+
+**Reading out the calibration (`CDP?`, decoded 2026-11-24 by emulating the reply code).** The
+meter answers with 114 separate messages, one per slot, e.g. `CDP  001,+1.353806E+06`. The letter
+after `CDP ` is blank for a good slot, `E` when the three RAM copies of that slot all disagree, or `N` on
+every line while the "calibration altered" seal is set. The seal is a triple-redundant settings byte
+right after the calibration copies (byte 4 at 0x03CD/0x059C/0x076B): `CDP S` sets it to 'a', `CDP R`
+back to 'N'. While it is 'a', every range shows NC in normal use. Queries are queued before any
+calibration-mode check, so `CDP?` works in normal measuring mode. Values round-trip through the
+firmware's own formatter and parser within 0.47 ppm, so a `CDP?` dump can be restored with
+`CDP n,value` in calibration mode. Step-by-step guide: [`CALIBRATION_BACKUP.md`](CALIBRATION_BACKUP.md).
+**Not yet tested on a real meter.**
+
+**Still open:** the DMP display mode; output formatting of
+measurement readings; and the interface board's I²C framing.
+
+## Measurement internals (decoded 2026-11-24)
+
+**Analog configuration per function and range.** After the motor switch settles,
+`meas_setup_analog` (0x2698) copies 3 bytes from `analog_cfg_table` (0x29EC; index from
+`analog_cfg_index` 0x29D0 + range × 3) into the two analog shift-register bytes (08h, 09h) and the
+OQ0071 output latches (0Ah). Full table: [`out/analog_table.md`](out/analog_table.md)
+(`tools/analog_table.py`). Bits whose meaning is clear from the pattern:
+
+| Byte / bit | Meaning | Evidence |
+|---|---|---|
+| 08h bits 0–2 | input divider: none / bit2 = ÷10 / bit0 = ÷100 / bit1 = ÷1000 | VDC ranges 0–4 = 78, 78, 7C, 79, 7A; same pattern for Vpeak and VAC |
+| 08h bit 7 | AC signal path (RMS converter) | set for VAC, Vrms, IAC; toggled in the RMS auto-zero |
+| 0Ah bit 3 / bit 2 | ADC sensitivity 90 mV / 900 mV (manual 3e) | 0x0B on the lowest ranges (200 mV, 200 Ω, alternate current ranges), 0x07 elsewhere |
+| 0Ah bit 7 | DC measurement | VDC, IDC, Ω |
+| 0Ah bit 5 | resistance (current source) | all Ω, °C, diode, continuity |
+| 09h low bits | range resistor | Ω ranges 50, 50, 51, 44, 45, 40, 41 |
+
+**Conversion.** The OQ0071 gets a wait time T1 (`adc_wait_time`, XDATA 0x00F0, computed from the
+mains setting by `meas_calc_wait_time`) and a count time T2:
+
+| SPEED | T2 (counts) | conversions summed |
+|---|---|---|
+| 1 (high resolution) | 29360 | 10 |
+| 2 (normal) | 29360 | 1 |
+| 3 (high speed) | 2936 | 1 |
+
+AC functions run a two-phase auto-zero of the RMS converter before each conversion (latch bit 6 /
+08h bit 7, each with a settle time). Vpeak uses fixed times (0xF9A7), selects the positive or negative
+peak detector with latch bits 5/4, and measures both for Vpp.
+
+**From count to value.**
+1. `adc_count_minus_zero`: signed count = raw counter − T2. The delta-modulation ADC counts up and
+   down around T2. |count| ≥ T2 → overload.
+2. Function offsets: AC functions subtract the **RMS byte** (the per-unit RMS-converter offset that
+   `RMS n` sets in calibration mode; meter 1 = 87, fallback 65). Vpeak subtracts 100; capacitance
+   divides by 10 and subtracts 3.
+3. Range checks and autoranging (`autorange_step`).
+4. `cal_apply`: value = (count − zero_eff) × gain_eff, with the temperature-compensated coefficients
+   (set 1 for negative VDC, Vp− and capacitance in SPEED 3).
+5. `input_step_detect` restarts averaging after a jump; `display_stabilize` holds the last digit
+   against ±1-count flicker; in SPEED 3 the last digit is dropped.
+6. `count_to_value` (× 10^(base + range)), then dB / relative (`result_apply_db_rel`), publish and display.
+
+## Timing and frequency (decoded 2026-11-24)
+
+The 12 MHz crystal (G1701) gives a 1 µs machine cycle. The timer functions set TMOD = 0x15:
+Timer 1 is a 16-bit timer counting 1 µs ticks, and Timer 0 counts edges on the T0 pin (P3.4, the
+input comparator).
+
+| Function | How it measures |
+|---|---|
+| **Time interval** (`acq_time`, `meas_process_time`) | P3.1 selects the comparator slope. Timer 0 is preset to 0xFFFF, so the first (start) edge overflows it; its ISR starts Timer 1 and switches P3.1 to the stop slope; the next edge stops Timer 1. Timer 1 overflows are counted in the ISR, giving a 32-bit µs count. seconds = count × 10⁻⁶, timebase calibration (slot x388) applied. Range r = 10^(r−1) s (r = 1…6), overload above 1.1×; autorange picks the smallest decade. The stop edge has a timeout of 0xD7 measurement passes. |
+| **Capacitance** (`acq_cap`) | Charge with a range-dependent current (shift-register 09h from `cap_range_table` 0x2A7F, P1.5 releases the discharge). Timer 1 times until the comparator fires INT1. Overrange when Timer 1 passes 0xD1xx (0x62xx in SPEED 3). Normally 2 charge cycles per reading. |
+| **Frequency** (`acq_freq`) | Timer 0 counts input edges (overflows extended in the ISR); Timer 1 makes the gate. Gate = 16 × 65.536 ms = **1.048576 s**, 2 × 65.536 ms = 131 ms in SPEED 2, or a quick 10 ms (0xD8F0) for gate autoranging (`freq_autorange`). The lowest range sums 10 gates (10.49 s): 10 kHz × 10.49 s ≈ 104858 counts. |
+
+The binary gate lengths are corrected with float constants: 0x7055 = 0.953674316 = 1/1.048576
+exactly, 0x7059 ≈ 1/1.31072. Three more variants (0x7049, 0x704D, 0x7051) are about 24 ppm smaller,
+which fits a compensation of about 25 µs of gate-switching latency.
+Checks: 10 kHz on the 0.1 Hz range gives 104858 counts, × 0.9537 = 100000 (full scale).
+
+Mains timing: the INT1 handler loads Timer 1 with one mains period, 20.000 ms or 16.667 ms, from the
+50/60 Hz setting (see "CHECK menu and stored settings"). Exactly which measurement uses that gate is
+not traced yet.
+
+## Number library (decoded 2026-11-24, probed in the emulator)
+
+`tools/probe_lib.py` calls a library routine in the emulator with test operands and prints the
+result; the names below come from those runs plus the code. Beyond the earlier float basics:
+
+| Routine | Function | Probe result |
+|---|---|---|
+| `fp_sqrt` 0x6417 | square root | √10 = 3.162278, √2 = 1.414214, √100 = 10 |
+| `fp_log10` 0x645D / `fp_ln` 0x646A | logarithms (log10 = ln × 0.4342945), used for dB | ln 2 = 0.6931472 |
+| `i24_to_fp` 0x631D | 24-bit int → float in place | 123456 → 123456 |
+| `fp_to_i24_round` 0x62B3 | float → int, round half away from zero | 5.5 → 6, −5.5 → −6 |
+| `i24_add` / `i24_sub` / `i24_neg` / `i24_abs` / `i24_shl1` … | 24-bit integer helpers | 1000 ± 7, 1000 → 2000 |
+| `fp_format` 0x5F4B | float → text (E-notation) | used by readings and replies |
+| `parse_number_char` 0x5E1A | decimal accumulator for the command parser | |
+
+## Measurement output format (decoded 2026-11-24)
+
+With `OUT S`, a reading is `<mnemonic><a><b><flag> <value>`, e.g. `VDC    +000.141E-03`
+(`reply_put_reading_header` 0x4C58, `reply_put_reading_value` 0x4A84):
+
+| Char | Values |
+|---|---|
+| a | `D` = dB mode, else space |
+| b | `Z` = zero/relative on, `C` = calibration mode, else space |
+| flag | first match in this order: `?` no reading yet since the last function/trigger change, `O` overload, `F` calibration step failed, `N` not calibrated (RAM data invalid or seal 'a'), `U` dB underflow (reading too small for the log), `R` reading not settled (more than 9 unstable readings, 29 in calibration mode), `C` crest factor exceeded (AC functions, latch on P3.4), blank = normal |
+
+The flags come from the result status byte (`meas_build_status` 0x1839), published with the value
+at XDATA 0x0064/0x0065/0x0085 (`meas_publish_result`). This explains every flag seen on the real
+meters: `?` while no fresh reading exists, `N` on meter 2 (lost calibration), and a transient `R`
+after a pause (input changed, reading not yet stable). `OUT N` omits the header and sends only the
+value.
+
+The interface-link routines are named after your hardware notes (`iface_*` in `tools/s25.sym`,
+0x7D87–0x7FD7). S25 implements the same framing: commands `0nnnnn` + data + checksum, replies
+`0x20|len` (bit 6 = END), identity `0x60|len`, checksum "add then rotate right", status
+`0x80 | (2Eh & 0x3F)`.
+
+## Display and keyboard (decoded 2026-11-24)
+
+**LCD** (PCF8576 at 0x70 on the internal bus, `lcd_send_frame` 0x5549). The display text is built
+as ASCII in XDATA 0x0000 (`lcd_format_reading`, `lcd_show_message`). Each frame sends the command bytes
+`C8 86 E0 F8 70` (mode set, data pointer 6, device 0, bank 0, blink off), then 13 segment bytes:
+7 main digits, the 2-digit auxiliary field and an annunciator byte built from interface and mode
+flags. Font `lcd_font_7seg` (0x580C), one byte per ASCII character 0x20–0x7F:
+
+| Bit | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
+|---|---|---|---|---|---|---|---|---|
+| Segment | d | c | a | b | dp | e | f | g |
+
+e.g. '0' = 0xF6, '2' = 0xB5, 'r' = 0x05, '-' = 0x01. A '.' in the text is merged into a digit's dp segment.
+
+**Keyboard** (4×4 matrix on the PCF8574 at 0x48, `key_scan` 0x5934): write 0xF0 and read, write
+0x0F and read, OR the results, match against `key_code_table` (0x5974), debounce. The key number goes
+through `key_jtab` (0x2B31). Each handler stores a command index (the same numbering as the remote
+commands), so front panel and remote share one executor. Pressing a function key again
+toggles to the related function:
+
+| Key | Action |
+|---|---|
+| 0 | VDC; again in VDC: cycle SPEED |
+| 1 | VAC; again: V rms |
+| 2 | Vpeak, cycles Vp+ → Vp− → Vpp |
+| 3 | Ω 2-wire; again: continuity |
+| 4 | Ω 4-wire; again: °C (Pt-100) |
+| 5 / 6 | I DC / I AC |
+| 7 | capacitance; again: diode |
+| 8 | frequency; again: SPEED |
+| 9 | time interval; again: cycles start/stop slopes |
+| 10 | dB on/off |
+| 11 | ZERO (relative); in calibration mode it starts the calibration step |
+| 12 | sets status bits 0x21 (purpose not traced) |
+| 13 / 14 / 15 | range down / range up / AUTO |
+
+Key numbers are matrix positions; the physical key labels are inferred from the action.
+
+## CHECK menu and stored settings (decoded 2026-11-24)
+
+**CHECK = SHIFT + key 14.** With SHIFT active, keys 10–15 open edit menus: key 10 the dB reference,
+key 11 the zero reference (RCL), key 13 the min/max display, key 14 CHECK. CHECK steps through:
+- `CAL 0` / `CAL 1` first when calibration is enabled (CAL key held at reset): selects cold/hot;
+- with an interface fitted: `rTL` (return to local), `ADDr` (GPIB address), `T.ONLY` (talk-only),
+  `Cr` (append CR). These are the manual's "4 steps" for /51/61;
+- `60H 0/1`: mains frequency (0 = 50 Hz, 1 = 60 Hz);
+- `SOFT xx`: software version.
+
+The same settings can be set remotely (`IEE`, `TOL`, `CR`, `SIX`). They are kept as triple-redundant
+bytes in the battery RAM (0x03CA+i, 0x0599+i, 0x0768+i, 2-of-3 vote):
+
+| Byte | Content | Meter 1 (backup) |
+|---|---|---|
+| 1 | interface config: bits 0–4 GPIB address (invalid or 31 → default 22), bit 7 talk-only | 0x16: address 22, talk-only off |
+| 2 | mains: non-zero (written as 0x55) = 60 Hz, 0 = 50 Hz | 0x00: 50 Hz |
+| 3 | CR: non-zero (0x55) = append `\r`, 0 = off | 0x00: off |
+| 4 | calibration seal: 'N' normal, 'a' altered | 'N' |
+
+The mains setting (flag 22h.4) sets the integration gate: the INT1 handler loads Timer 1 with 0xB1E0
+(20.000 ms) for 50 Hz or 0xBEE5 (16.667 ms) for 60 Hz, one mains period. So `SIX` really means
+"sixty", and a wrong setting gives poor mains rejection.
+
+## Hardware results from the Pico interface work (merged 2026-11-24)
+
+Your real-hardware notes are now in [`manuals/06_option_bus_protocol_hardware_notes.md`](manuals/06_option_bus_protocol_hardware_notes.md)
+(protocol, framing, checksum, event codes, two-meter comparison) and
+[`manuals/07_interface_research_notes.md`](manuals/07_interface_research_notes.md).
+
+**Bus naming.** The two documents use swapped letters:
+
+| Here (`tools/s25.sym`) | Notes 06 | Pins | Devices |
+|---|---|---|---|
+| bus A (`i2cA_*`) | bus B (option) | SDA P1.1, SCL P3.2/INT0 | interface slave 0x58–0x5E, PCF8574 0x4E (data-hold probe) |
+| bus B (`i2cB_*`) | bus A (internal) | SDA P1.7, SCL P3.5/T1 | LCD 0x70, keyboard 0x48, OQ0071 0x80–0x8D |
+
+**Agreements** (independent decode and hardware): slave address 0x58 | ((R4>>4)&6); init bytes
+`F8 F4 FE FA`; the command table and flag bit 5 = query; the S25 table changes (MTS, SIX/CR/IEE query
+flags, EMO/TOL index 28h); the RMS byte layout and default 65; settings at 0x03CA/0x0599/0x0768;
+`CDP ?` prefix `E`/`N`; `DMP ?` as an 11-item dump.
+
+**Answers to open points in note 06:**
+- *Why `CDP ?` returned only one line:* it answers 114 times, one END-terminated block per talk
+  request (FE). The host stopped after the first END. See [`CALIBRATION_BACKUP.md`](CALIBRATION_BACKUP.md).
+- *`JCV ?` / "service data":* JCV is a RAM peek (verified in the emulator). Meter 1's
+  `001,000,001,000,000,021` is the error counters at 0x076C–0x0771: 0x076C = 1 (copy-1 checksum
+  errors, but this byte also counts measurement diagnostic events), 0x076E = 1 (one copy-3
+  checksum error), and 21 = 0x15 in 0x0771, a byte shared by the copy-3 repair counter and the
+  last calibration fail code.
+- *`'a'`/`'N'` set at 0x450E…0x4520:* that code is inside the **CDP** handler (0x44FA), not CAL:
+  `CDP R` → 'N', `CDP S` → 'a'.
+- *`MTS ?` = mains timing?* No: it's the motor-switch centring count written by
+  `meas_phase_switch` (0x25FF). Meter 1's `MTS 003` = a contact about 6 settle periods wide.
+- *Meter 2:* `E001`, `RMS 065` (the fallback) and NC all point to lost battery RAM. Its calibration
+  is very likely gone. A JCV dump of 0x0200–0x07FF would show whether any copy survived.
+
+## S08 → S25 changes
+- 452 S25 functions: 365 instruction-identical to S08, 78 changed, 9 new; 5 S08 functions have no S25 match.
+- New remote command **MTS** (entry 0x27). In the table, `SIX`/`CR` flags change 0x01→0x21, `IEE` 0x02→0x22,
+  and `EMO`/`TOL` move to code 0x28.
+- `task_remote_reply` grows 1138 → 1228 bytes (extra reply strings, new command handling).
+- `task_543C` gains a second call with xdata 0x01D1 / R0=0x5F.
+- `main_loop` gains extra interface-flag handling (sets bit 7 of xdata 0x0053).
+- Many changed functions differ only by moved table pointers, or by code generation (S08 `CJNE` vs S25
+  `CLR C / SUBB / JZ`). That suggests S25 was rebuilt with a different compiler version, not hand-patched.
+
+## Naming status
+
+**Milestone A (2026-11-24): every function is named.** All 492 functions Ghidra finds (452 in the
+tracer's list plus Ghidra's split entry points) have names, together with about 680 symbols overall
+(code, labels, tables, IRAM, bit and XDATA variables) in `tools/s25.sym`. Names with "(inferred)" in
+their comment come from what the function touches rather than a full reading. Everything else was
+read in the code, checked against the manuals, or run in the emulator.
+
+**Milestone B (in progress): readable source in [`src/`](src/README.md).**
+- `src/*.c`: the complete decompilation, one file per subsystem (main, i2c, iface_link, remote_parser,
+  remote_commands, calibration, settings, measure, display, keyboard_menu, lib_math, lib_util), generated
+  from the Ghidra output by `tools/make_src.py` with readable names (`ram_XX`, `xram_XXXX`, `bit_2X_Y`,
+  named variables) and each function's address and description. `src/pm2525.h` declares every variable.
+- `src/clean/*.c`: all 12 modules rewritten by hand at the semantic level, each compiling cleanly
+  (`arm-none-eabi-gcc -fsyntax-only -Wall -std=gnu99`). The remote parser is verified against the
+  original by `tools/check_parser.py` (721 command lines, 0 differ). Storage and CDP output are checked
+  against meter 1's RAM dump by `tools/check_cal_backup.py`. Where a clean module simplifies
+  hardware sequencing (motor switch, timer set-up), it says so and points at the generated file.
+
+**Milestone B (2026-11-24): done.**
+
+**Milestone C (2026-11-24): verification.** `tools/check_clean.py IMAGE RAM_DUMP` runs the original
+routines in the emulator and compares them with a line-for-line Python mirror of the hand-cleaned C.
+
+| Test | Original routine | Cases | Differences |
+|---|---|---|---|
+| scale_exp | `range_scale_exp` 0x165A, all functions × ranges × 10 A input | 224 | 0 |
+| limits | `range_param_lookup` 0x19A8 (autorange thresholds) | 224 | 0 |
+| cmd_index | `func_to_cmd_index` 0x4814 | 224 | 0 |
+| rms | `rms_get_byte` 0x5B93 (2-of-3 repair) | 220 | 0 |
+| recipes | `cal_load_range` + `cal_compute_effective` on meter 1's RAM, every range, normal and cal mode | 160 | 0 |
+| rec_fuzz | the same with 1–2 random slots corrupted (exercises NC and default paths) | 975 | 0 |
+| queries | `task_remote_reply` single-item queries, random states | 588 | 0 |
+| readings | measurement output header and invalid-value field | 494 | 0 |
+| classify | `cal_classify_input` 0x0B3E, fail codes 1–9 | 1284 | 0 |
+
+Together with `tools/check_parser.py` (721 lines), that is 5114 compared cases. Building the checks
+found and fixed three errors in the hand-cleaned code:
+- the limit check in multi-term coefficients applies to each new term, not to the running product;
+- 0x377C decides whether a value is shown signed (it was misnamed `nc_display_allowed`);
+- recipe entry byte 3 holds the step flags of coefficient set 1. It is non-zero only for Vpeak 2 V
+  (Vp−, 0x3F) and VDC 20 V (the −20 V gain point, 0x0A, cold only), matching manual adjustments
+  28/34 and 32.
+
+Not covered by an emulator comparison: the hardware sequencing in `measure.c` (motor switch, timer
+set-up, ADC phases), which needs the real peripherals; the float formatter's digit layout (it is
+the original routine in both paths); and the LCD segment frame. Those parts of the clean source are
+written from the code and say so.
+
+## Buildable firmware source (2026-11-24)
+
+[`fw/`](fw/README.md) holds the firmware as a relocatable assembler source for SDCC 4.5 (sdas8051 / sdld),
+with C files compiled in. Run `python tools/test_fw.py` to build and test.
+
+- **Identical rebuild:** the generated source rebuilds byte-identical to `PM2525_S25.BIN`.
+- **Relocatable:** code in CODE_A (0x002B–) and CODE_B (0x77B6–) can be edited, grown or deleted;
+  the linker moves everything after it. Only the data block 0x6DAB–0x77B5 is pinned, because routines
+  address it with separately loaded high/low bytes.
+- **Proven:** a test layout with all code moved (old places empty) passes the full emulator suite
+  (4393 + 721 cases).
+- **Hazards found and made symbolic:**
+  - a ROM table below 0x0800 (`cal_recipe_offsets`, loaded with `MOV DPTR,#0x0738`);
+  - two jump tables whose base lies before the table (`label−k`);
+  - 41 calibration-recipe pointers into the moving `pow10_table`. These would have broken
+    calibration silently.
+- **First C routine:** `func_to_cmd_index` (`fw/c/func_to_cmd_index.c`) replaces its assembly. It
+  passes all tests, preserves every register (3000 random states) and doesn't deepen the worst-case
+  stack.
+- **Constraints:**
+  - ROM is full: 40 bytes were free in the original, about 16 with the C demo. The meter's EPROM pin 1
+    is not connected to A15, so a 27C512 is not an option.
+- **Space optimizer (2026-11-25):** `tools/shrink_fw.py` builds with LJMP→SJMP/AJMP and LCALL→ACALL
+  wherever the target reaches. Same machine cycles, so timing is unchanged. It frees **915 bytes**,
+  giving 931 free in all (745 at the end of CODE_A, 185 at the end of CODE_B). It leaves alone:
+  - jump-table entries;
+  - code near the two `MOVC A,@A+PC` tables;
+  - `label±k` spans;
+  - lines marked `; keep`.
+
+  `python tools/test_fw.py --shrink` passes the full suite on the result.
+  - IRAM is full: C may only use XDATA 0x07A3–0x07FC.
+  - The stack is 32 bytes and already about 25 deep.
+
+## Findings from the hand-cleaned source (2026-11-24)
+
+Rewriting each module by hand turned up these details (all from the code):
+
+- **Command side effects** come from one table, ROM 0x6F24, indexed by command:
+  - bit 0 restarts the measurement;
+  - bit 2 stores the speed;
+  - bit 3 resets min/max;
+  - bit 4 switches dB and relative off;
+  - bit 6 restarts the result record;
+  - bit 7 invalidates min/max.
+
+  Function commands have 0xDF; RNG, TRG, RMS and the range keys 0x41; DBM, ZER, MSP and RSL 0xC9;
+  CAL 0xD1; CLM 0x08; SIX 0x01.
+- **Command restrictions:**
+  - DBM ON only works in Vpeak/VDC/VAC/Vrms and not in calibration mode.
+  - ZER is refused in continuity.
+  - `ZER MIN`/`ZER MAX` copies the min/max reading as the reference.
+  - `OUT N`, `MIN?`, `MAX?`, `CLM` and `TRG I` are refused in calibration mode.
+  - MSP/RSL cannot change the speed in calibration mode; they only confirm it.
+  - With the 10 A input in use, only IDC/IAC are accepted.
+  - `IEE` accepts 0–30.
+  - Command index 41 is `rTL` (CHECK menu only).
+- **Calibration mode entry** (`cal_mode_enter`): with internal trigger, the trigger becomes external
+  (so each step needs ZERO / `X`) and slot x384 is cleared in all three copies.
+- **Calibration coefficient limits** when loading:
+  - K0 within ±0.2 × nominal;
+  - K1 0.8–1.2 (0.75–1.5 on the Ω2W top range);
+  - K2/K3 0.3–0.7;
+  - K4 within ±0.5 × nominal;
+  - K5 within ±0.5 (±5 on Ω2W ranges 5–6 and VAC range 2).
+
+  Outside these limits, a coefficient takes its default in calibration mode; in normal use the whole
+  range shows NC.
+- **Calibration step windows:**
+  - Gain points must lie within 0.90–1.10 × nominal for VDC and FRQ, 0.68–1.32 on the Ω2W top range,
+    and 0.81–1.19 otherwise.
+  - The resulting gain must lie within 0.808–1.188.
+  - Stability window = 0.5 (VDC 0.05, °C 0.15) × 10^range exponent.
+- **Internal temperature** T = count / 2000. Readings outside 0.31–0.69 are ignored. Steps under 0.01
+  are filtered (0.8 old + 0.2 new); larger steps are taken directly.
+- **Pt-100:** T = 3367.85 − √(13065975 − 17235.58 · R).
+- **dB:** dBm = 10 · log10(V² · 1000 / Zref). Below 8 counts the reading is flagged `U` and shown as
+  ` -UL----`.
+- **Display messages:**
+  - ` -OL----` overload;
+  - ` -UL----` dB underflow;
+  - ` FAIL   ` calibration step failed;
+  - ` -OFL---` value does not fit;
+  - `NC` over positions 7–8;
+  - `r` at position 8 in calibration mode.
+- **Signed and unsigned values** (0x377C, emulator-verified): VDC, IDC, °C, Vp+ and Vp− are shown with a
+  sign, as is anything in dB, relative or cal-enable mode. All other functions are shown without a
+  sign, on the LCD and in the interface output.
+- **Indicator:** a 16-segment ring/bar (two bytes, tables 0x3A91/0x3AAF/0x3ACD). It steps with the
+  trend of the reading in normal use, is a centre-zero bar in relative mode, and a magnitude bar for
+  continuity.
+- **Range thresholds** (`range_param_lookup`, counts down / up / overload):
+  - Vpeak: 180 / 2000 / 2100, or 180 / 1000 / 1100 on ranges 4–7;
+  - V: 1800 / 20000 / 21000, or 1800 / 10000 / 11000 on ranges 4–7;
+  - Ω and CAP: 1800 / 20000 / 21000;
+  - I: 900 / 10000 / 11000;
+  - time: 100000 / 110000;
+  - FRQ: 9000 / 100000 / 110000 (200000 / 210000 on range 6–7);
+  - °C: 4000;
+  - diode and continuity: 21000.
+- **Last-digit stabiliser** (`display_stabilize`): within ±4 counts (VDC ±15), a signed tally must
+  reach 6 (VDC 20) before the shown count moves by one. Bigger jumps are taken at once.
+- **Data-hold probe:** input bit 7 of the PCF8574 at 0x4E is the button; output bit 1 is its LED.
+  With external trigger the button acts as the trigger.
