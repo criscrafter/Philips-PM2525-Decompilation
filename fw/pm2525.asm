@@ -10266,42 +10266,7 @@ L_4812::
 L_4813::
         ret                                          ; 4813
 
-; current function -> mnemonic index (for FNC?, RSL)
-func_to_cmd_index::
-        mov    a, #0x0F                              ; 4814
-        anl    a, meter_state                        ; 4816
-        jnz    L_4822                                ; 4818
-        mov    a, meter_mode                         ; 481A
-        rl     a                                     ; 481C
-        rl     a                                     ; 481D
-        anl    a, #0x03                              ; 481E
-        dec    a                                     ; 4820
-        ret                                          ; 4821
-L_4822::
-        mov    a, #0x0F                              ; 4822
-        anl    a, meter_state                        ; 4824
-        clr    c                                     ; 4826
-        subb   a, #0x08                              ; 4827
-        jnc    L_4832                                ; 4829
-        mov    a, #0x0F                              ; 482B
-        anl    a, meter_state                        ; 482D
-        add    a, #0x02                              ; 482F
-        ret                                          ; 4831
-L_4832::
-        mov    a, #0x0F                              ; 4832
-        anl    a, meter_state                        ; 4834
-        cjne   a, #0x08, L_4843                      ; 4836
-        mov    a, meter_mode                         ; 4839
-        swap   a                                     ; 483B
-        anl    a, #0x0F                              ; 483C
-        anl    a, #0x03                              ; 483E
-        add    a, #0x0A                              ; 4840
-        ret                                          ; 4842
-L_4843::
-        mov    a, #0x0F                              ; 4843
-        anl    a, meter_state                        ; 4845
-        add    a, #0x05                              ; 4847
-        ret                                          ; 4849
+; current function -> mnemonic index: moved to C (fw/c/func_to_cmd_index.c), glue at the end of CODE_B
 
 reply_value_cmp_ten::
         mov    sfr_DPH, 0x29                         ; 484A
@@ -18073,6 +18038,24 @@ iface_load_channel::
         lcall  iface_ctx_load                        ; 7FD2
         pop    sfr_ACC                               ; 7FD5
         ret                                          ; 7FD7
-        .db 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF ; 7FD8 FREE
-        .db 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF ; 7FE8 FREE
-        .db 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF                                   ; 7FF8 FREE
+
+; ===================================================================================================
+; C routines (fw/c/*.c). Each keeps the original assembly interface through a few lines of glue:
+; SDCC code assumes register bank 0, may change R0-R7, B and DPTR, and returns 8-bit results in DPL.
+; ===================================================================================================
+
+; current function -> mnemonic index (for FNC?, RSL); was assembly at 0x4814 (54 bytes).
+; Interface kept: result in A, all other registers and DPTR unchanged.
+func_to_cmd_index::
+        push   sfr_PSW
+        mov    sfr_PSW, #0x00                      ; register bank 0 for the C code
+        push   0x06                                ; R6, R7 of bank 0 (used by the C code)
+        push   0x07
+        push   sfr_DPL
+        lcall  _c_func_to_cmd_index
+        mov    a, sfr_DPL
+        pop    sfr_DPL
+        pop    0x07
+        pop    0x06
+        pop    sfr_PSW
+        ret

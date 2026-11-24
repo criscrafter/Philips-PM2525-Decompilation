@@ -2,16 +2,16 @@
 
 This folder is the buildable source of the S25 firmware. It assembles and links with SDCC 4.5
 (`C:\Program Files\SDCC`). C files are compiled into the firmware too. The source as generated rebuilds
-**byte-identical** to `firmware/PM2525_S25.BIN`.
+**byte-identical** to `firmware/PM2525_S25.BIN` when built without the changes of this branch (as on `main`).
 
 | Path | What |
 |---|---|
 | `pm2525.asm` | the firmware in assembly. All routines are named; all addresses are symbolic. **This is the source you edit.** |
-| `c/*.c` | C routines linked into the firmware (none on `main`) |
+| `c/*.c` | C routines linked into the firmware |
 | `build.ini` | build options: `shrink = yes` builds through the optimizer |
 | `c/pm2525_fw.h` | the firmware's SFRs, RAM variables and bits for C (generated: `python tools/make_c_header.py tools/s25.sym fw/c/pm2525_fw.h`) |
 | `reference/pm2525_original.asm` | untouched generated source; builds to the original image |
-| `out/pm2525.bin` | your build: burn this into a 27C256 |
+| `out/pm2525.bin` | your build (optimized): burn this into a 27C256 |
 | `out_ref/pm2525.bin` | the original, rebuilt from source (identical to the factory image) |
 
 ## Build and test
@@ -30,12 +30,19 @@ a copy with all code moved to other addresses, and runs the emulator test suites
 `ALL TESTS PASSED` means the logic behaves like the original and nothing depends on a hard-coded
 address. Just building is `python tools/build_fw.py`.
 
-## This branch: unmodified (`main`)
+## This branch: optimized (`optimized`)
 
-`pm2525.asm` is the factory firmware, and `out/pm2525.bin` is identical to the S25 EPROM. The
-`optimized` branch has the same source built smaller (915 bytes freed) and an example routine in C.
-You can also switch on the optimizer here: set `shrink = yes` in `build.ini`, or run
-`python tools/test_fw.py --shrink`.
+The build behaves like the original but is smaller. `build.ini` has `shrink = yes`, so
+`python tools/test_fw.py` builds through `tools/shrink_fw.py`. That turns long jumps and calls into
+short ones wherever they reach: **915 bytes freed, 931 free in all** (745 at the end of `CODE_A`,
+185 at the end of `CODE_B`). Your source keeps the long forms.
+
+It also contains one change written in C: `func_to_cmd_index` (current function → mnemonic, used
+by `FNC?`, `RSL?` and every reading header) comes from `c/func_to_cmd_index.c` instead of assembly.
+It passes all tests, and its register use and stack depth have been checked. Use it as the template
+for your own C routines.
+
+The unmodified firmware is on the `main` branch.
 
 ## Memory layout and rules
 
@@ -67,8 +74,8 @@ You can also switch on the optimizer here: set `shrink = yes` in `build.ini`, or
   tested paths. Keep C code shallow and don't call it from interrupt handlers.
 - **Calling C from assembly.** SDCC code assumes register bank 0, may change R0–R7, B and DPTR,
   takes its first argument in DPL (DPH, B, A for wider ones) and returns 8-bit results in DPL. Use a few
-  lines of glue that keep the original interface. The glue for `func_to_cmd_index` on the `optimized`
-  branch (end of `CODE_B`, C in `c/func_to_cmd_index.c`) is the template:
+  lines of glue that keep the original interface. The glue for `func_to_cmd_index` (end of `CODE_B`,
+  C in `c/func_to_cmd_index.c`) is the template:
   ```
   func_to_cmd_index::
           push   sfr_PSW
