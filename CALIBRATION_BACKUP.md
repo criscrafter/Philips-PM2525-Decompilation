@@ -18,17 +18,17 @@ The calibration is not in the EPROM. It lives in the battery-backed 6116 RAM (XD
 | 0x076C–0x0771 | error counters (also what plain `JCV ?` shows) |
 | 0x07FD–0x07FF | RMS byte (value, +0x55, +0xAA) |
 
-Your meter 2 (`CDP E001`, `RMS 065`, NC on the display, garbage `JCV ?`) matches this RAM having been
+Test meter 2 (`CDP E001`, `RMS 065`, NC on the display, garbage `JCV ?`) matches this RAM having been
 lost: `E` means the three copies of a slot all disagree, and 65 is the RMS fallback value.
 
 ## Method 1 (recommended): bit-exact RAM dump with `JCV`
 
 `JCV <address>` (decimal) sets a one-shot read pointer; the next `JCV ?` returns the 6 bytes at that
 XDATA address as `JCV ddd,ddd,ddd,ddd,ddd,ddd` (decimal bytes). Without a fresh `JCV <address>` it
-reads 0x076C (1900). Verified in the emulator, including your meter 1's exact `JCV ?` answer.
+reads 0x076C (1900). Verified in the emulator, including test meter 1's exact `JCV ?` answer.
 No calibration mode is needed.
 
-Host loop over the Pico (commands framed as in your notes, one message each):
+Host loop over the Pico (commands framed as in `manuals/06_option_bus_protocol_hardware_notes.md`, one message each):
 
 ```
 for addr in range(0x0000, 0x0800, 6):      # 342 steps
@@ -43,8 +43,8 @@ calibration, checksums, settings, counters and RMS. Below 0x0200 is working RAM.
 
 ## Method 2: the meter's own calibration listing, `CDP ?`
 
-`CDP ?` answers **114 times, one data block (header 6x, with END) per talk request**. Your earlier
-test stopped after the first END, which is why only `CDP  001,…` appeared.
+`CDP ?` answers **114 times, one data block (header 6x, with END) per talk request**. A reader that
+stops after the first END sees only `CDP  001,…`.
 
 ```
 send "CDP ?"

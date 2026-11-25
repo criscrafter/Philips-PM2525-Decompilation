@@ -46,8 +46,8 @@ to the folder with `sdas8051`). The Ghidra script in Part 2 is Windows-only.
      `$env:SDCC_BIN = "D:\path\to\SDCC\bin"`.
 2. **Get the source:**
    ```powershell
-   git clone https://github.com/criscrafter/<repo-name>.git
-   cd <repo-name>
+   git clone https://github.com/criscrafter/Philips-PM2525-Decompilation.git
+   cd Philips-PM2525-Decompilation
    ```
 3. **Pick a branch:**
    - `git switch main`: the unmodified firmware.
